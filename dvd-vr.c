@@ -19,7 +19,7 @@
  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-#if 0
+/*
 
 Build:
 
@@ -28,8 +28,8 @@ Build:
 
 Usage:
 
-    To get info:   dvd-vr /media/dvd/DVD_*/*.IFO
-    To rip:        (cd dest-dir && dvd-vr /media/dvd/DVD_*/{*.IFO,*.VRO}
+    To get info:   dvd-vr /media/dvd/DVD_RTAV/VR*.IFO
+    To rip:        (cd dest-dir && dvd-vr /media/dvd/DVD_RTAV/{*.IFO,*.VRO}
 
 
 Notes:
@@ -68,8 +68,14 @@ Requirements:
 Changelog:
 
     V0.1:       16 Feb 2007     Initial release
+    V0.2:       29 Mar 2007     Portability fixes
+                                  Fixed up comments to support more compilers
+                                  Removed linux specific mremap() call
+                                  Don't try to use posix_fadvise() where not available
+                                  OS X also defines NTOH[LS], so undef first
+                                  Use utimes(filename) rather than futimes(fd)
 
-#endif//0
+*/
 
 #define _GNU_SOURCE           /* for posix_fadvise() and futimes() */
 #define _FILE_OFFSET_BITS 64  /* for implicit large file support */
@@ -140,13 +146,13 @@ void percent_display(percent_control_t percent_control, unsigned int percent)
     fflush(stdout);
 }
 
-/* Set access and modfied times of fd
+/* Set access and modfied times of filename
    to the specified broken down time */
-int touch(int fd, struct tm* tm)
+int touch(const char* filename, struct tm* tm)
 {
     time_t ut = mktime(tm);
     struct timeval tv[2]={ {.tv_sec=ut, .tv_usec=0}, {.tv_sec=ut, .tv_usec=0} };
-    return futimes(fd, tv);
+    return utimes(filename, tv);
 }
 
 /*
@@ -170,6 +176,7 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
         }
     }
 
+#ifdef POSIX_FADV_DONTNEED
     /* Don't fill cache with SRC.
     Note be careful to invalidate only what we've written
     so that we don't dump any readahead cache. */
@@ -182,6 +189,7 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
     and dest are on the same hard disk at least. I guess
     this is due to implicit syncing in posix_fadvise()? */
     posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
+#endif //POSIX_FADV_DONTNEED
 
     return 0;
 }
@@ -202,8 +210,10 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
 
 /* DVD structures are in network byte order (big endian) */
 #include <netinet/in.h>
-# define NTOHS(x) x=ntohs(x) /* 16 bit */
-# define NTOHL(x) x=ntohl(x) /* 32 bit */
+#undef NTOHS
+#undef NTOHL
+#define NTOHS(x) x=ntohs(x) /* 16 bit */
+#define NTOHL(x) x=ntohl(x) /* 32 bit */
 
 #define DVD_SECTOR_SIZE 2048
 
@@ -350,7 +360,7 @@ bool parse_video_attr(uint16_t video_attr)
     case 1: mode="MPEG2"; break;
     default: return false;
     }
-    printf("format: %s\n",mode);
+    printf("video_format: %s\n",mode);
 
     const char* aspect_ratio;
     switch (aspect) {
@@ -412,7 +422,9 @@ int main(int argc, char** argv)
             fprintf(stderr,"Error opening [%s] (%m)\n",argv[2]);
             exit(EXIT_FAILURE);
         }
+#ifdef POSIX_FADV_SEQUENTIAL
         posix_fadvise(vro_fd, 0, 0, POSIX_FADV_SEQUENTIAL);/* More readahead done */
+#endif //POSIX_FADV_SEQUENTIAL
     }
 
     rtav_vmgi_t* rtav_vmgi_ptr=mmap(0,sizeof(rtav_vmgi_t),PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
@@ -426,15 +438,19 @@ int main(int argc, char** argv)
     }
 
     uint32_t vmg_size = NTOHL(rtav_vmgi_ptr->mat.vmg_ea) + 1;
-    rtav_vmgi_ptr=mremap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t), vmg_size, MREMAP_MAYMOVE);
+    if (munmap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t)!=0)) {
+        fprintf(stderr,"Failed to unmap ifo file (%m)\n");
+        exit(EXIT_FAILURE);
+    }
+    rtav_vmgi_ptr=mmap(0,vmg_size,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
     if (rtav_vmgi_ptr == MAP_FAILED) {
-        fprintf(stderr,"Failed to reMMAP ifo file (%m)\n");
+        fprintf(stderr,"Failed to re MMAP ifo file (%m)\n");
         exit(EXIT_FAILURE);
     }
 
     NTOHS(rtav_vmgi_ptr->mat.version);
     rtav_vmgi_ptr->mat.version &= 0x00FF;
-    printf("DVD-VR V%d.%d\n",rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
+    printf("format: DVD-VR V%d.%d\n",rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
 
     NTOHL(rtav_vmgi_ptr->mat.pgit_sa);
     pgiti_t* pgiti = (pgiti_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.pgit_sa);
@@ -481,8 +497,8 @@ int main(int argc, char** argv)
     for (program=0; program<pgi_gi->nr_of_programs; program++) {
 
         int vob_fd=-1;
+        char vob_name[32];
         if (vro_fd!=-1) {
-            char vob_name[32];
             snprintf(vob_name,sizeof(vob_name),"program_%d.vob",program+1);
             vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
             if (vob_fd == -1) {
@@ -554,8 +570,8 @@ int main(int argc, char** argv)
         }
         if (vro_fd != -1) {
             percent_display(PERCENT_END, 0);
-            touch(vob_fd, &tm);
             close(vob_fd);
+            touch(vob_name, &tm);
         }
 
         printf("size: %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
