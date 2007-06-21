@@ -1,3 +1,4 @@
+//vim:fileencoding=utf8
 /*
  dvd-vr.c     Identify and optionally copy the individual programs
               from a DVD-VR format disc
@@ -74,6 +75,8 @@ Changelog:
                                   Don't try to use posix_fadvise() where not available
                                   OS X also defines NTOH[LS], so undef first
                                   Use utimes(filename) rather than futimes(fd)
+    V0.3:       18 Jun 2007     Fix random timestamp errors due to uninitialised tm_isdst.
+                                Patch from তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>
 
 */
 
@@ -387,6 +390,7 @@ bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
     tm->tm_hour=hour;
     tm->tm_min=min;
     tm->tm_sec=sec;
+    tm->tm_isdst=-1; /*Auto calc DST offset.*/
     char date_str[32];
     strftime(date_str,sizeof(date_str),"%F %T",tm); //locale = %x %X
     printf("date: %s\n",date_str);
