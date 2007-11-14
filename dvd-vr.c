@@ -38,7 +38,7 @@ Notes:
     Individual recordings (programs) are extracted,
     honouring any splits and/or deletes.
     Merged programs are not handled yet though as
-    I would need to parse the higher level program set info.
+    I would need to fully parse the higher level program set info.
     Note the VOBs output from this program can be trivially
     concatenated with the unix cat command for example.
 
@@ -75,9 +75,21 @@ Changelog:
                                   Don't try to use posix_fadvise() where not available
                                   OS X also defines NTOH[LS], so undef first
                                   Use utimes(filename) rather than futimes(fd)
-    V0.3:       18 Jun 2007     Fix random timestamp errors due to uninitialised tm_isdst.
-                                Patch from তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>
-
+    V0.3:       18 Jun 2007     তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>:
+                                  Fix random timestamp errors due to uninitialised tm_isdst.
+    V0.4:       14 Nov 2007     P@draigBrady.com:
+                                  Allow specifiying a particular program to process,
+                                  rather than all programs.
+                                Aaron Binns <aaron@randomshiznat.com>:
+                                  Report 480x480 resolution discs, and do better reporting
+                                  for unknown resolutions.
+                                Peter Van Hove <Peter@Smart-Projects.net>:
+                                  support program label extraction with example code
+                                  and nero generated disc images.
+                                Craig T. Snydal <ctsnydal@cantab.net>:
+                                Rafa Couto <rafacouto@gmail.com>:
+                                  Generate globally unique filenames using timestamps,
+                                  rather than just program_1.vob, program_2.vob, ...
 */
 
 #define _GNU_SOURCE           /* for posix_fadvise() and futimes() */
@@ -236,9 +248,9 @@ typedef struct {
         uint32_t pgit_sa;    /*program info table start address*/
         uint32_t info2_sa;   /*another start address*/
         uint8_t  zero4[40];
-        uint32_t info3_sa;   /*and another (program set info?) */
+        uint32_t def_psi_sa; /*default program set info start address*/
         uint32_t info4_sa;   /*and another*/
-        uint32_t info5_sa;   /*and another (user program set titles?)*/
+        uint32_t info5_sa;   /*and another (user defined program set info?)*/
         uint32_t info6_sa;   /*and another*/
         uint8_t  zero5[192];
     } PACKED mat;
@@ -301,6 +313,21 @@ typedef struct {
     uint16_t nr_of_programs;
 } PACKED pgi_gi_t; /* global info for ProGram Info */
 
+typedef struct  {
+    uint8_t  data1;
+    uint8_t  nr_of_psi;
+    uint16_t nr_of_programs;  /* Num programs on disc */
+} PACKED psi_gi_t; /* global info for Program Set Info */
+
+typedef struct  {
+    uint8_t  data1;
+    uint8_t  data2;
+    uint16_t nr_of_programs;  /* Num programs in program set */
+    char     label[128];      /* contains ascii at start */
+    uint16_t data3;
+    uint16_t id;              /* corresponding program set number */
+    char     data4[6];
+} PACKED psi_t;
 
 bool parse_audio_attr(audio_attr_t audio_attr0)
 {
@@ -309,20 +336,24 @@ bool parse_audio_attr(audio_attr_t audio_attr0)
     /* audio_attr0.audio_attr[2] = 7 for my camcorder ? */
 
     if (channels < 8) {
-        printf ("audio_channels: %d\n",channels+1);
+        printf ("audio_channs: %d\n",channels+1);
     } else {
         return false;
     }
 
-    const char* coding_name;
+    const char* coding_name="Unknown";
     switch (coding) {
     case 0: coding_name="Dolby AC-3"; break;
     case 2: coding_name="MPEG-1"; break;
     case 3: coding_name="MPEG-2ext"; break;
     case 4: coding_name="Linear PCM"; break;
-    default: return false;
     }
-    printf("audio_coding: %s\n",coding_name);
+    printf("audio_coding: %s",coding_name);
+    if (!strcmp("Unknown", coding_name)) {
+        printf( ". (%d). Please report this number and actual audio encoding.\n", coding );
+    } else {
+        putchar('\n');
+    }
 
     return true;
 }
@@ -334,96 +365,172 @@ bool parse_video_attr(uint16_t video_attr)
     int tv_sys      = (video_attr & 0x3000) >> 12;
     int compression = (video_attr & 0xC000) >> 14;
 
-    int vert_resolution=0;
-    int horiz_resolution=0;
+    int vert_resolution  = 0;
+    int horiz_resolution = 0;
     switch (tv_sys) {
     case 0:
-        printf("tv_system: NTSC\n");
+        printf( "tv_system   : NTSC\n" );
         vert_resolution=480;
         break;
     case 1:
-        printf("tv_system: PAL\n");
+        printf( "tv_system   : PAL\n" );
         vert_resolution=576;
         break;
     default:
         return false;
     }
+
     switch (resolution) {
     case 0: horiz_resolution=720; break;
     case 1: horiz_resolution=704; break;
     case 2: horiz_resolution=352; break;
     case 3: horiz_resolution=352; vert_resolution/=2; break;
-    default: return false;
+    case 4: horiz_resolution=544; break; /* this is a google inspired guess */
+    case 5: horiz_resolution=480; break; /* from Aaron Binns' disc */
     }
-    printf("resolution: %dx%d\n",horiz_resolution,vert_resolution);
+    if (horiz_resolution && vert_resolution) {
+        printf( "resolution  : %dx%d\n", horiz_resolution, vert_resolution);
+    } else {
+        printf( "resolution  : Unknown (%d). Please report this number and actual resolution.\n", resolution );
+    }
 
-    const char* mode;
+    const char* mode = "Unknown";
     switch (compression) {
     case 0: mode="MPEG1"; break;
     case 1: mode="MPEG2"; break;
-    default: return false;
     }
-    printf("video_format: %s\n",mode);
+    printf( "video_format: %s", mode );
+    if (!strcmp("Unknown", mode)) {
+        printf( ". (%d). Please report this number and actual compression format.\n", compression );
+    } else {
+        putchar('\n');
+    }
 
-    const char* aspect_ratio;
+    const char* aspect_ratio = "Unknown";
     switch (aspect) {
     case 0: aspect_ratio="4:3"; break;
     case 1: aspect_ratio="16:9"; break; /* This is 3 for DVD-Video */
-    default: return false;
     }
-    printf("aspect_ratio: %s\n",aspect_ratio);
+    printf( "aspect_ratio: %s", aspect_ratio );
+    if (!strcmp("Unknown", aspect_ratio)) {
+        printf( ". (%d). Please report this number and actual aspect ratio.\n", aspect );
+    } else {
+        putchar('\n');
+    }
 
     return true;
 }
 
 bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 {
+    bool ret=false;
+
     uint16_t year  = ((pgtm.pgtm[0]       ) <<8 | (pgtm.pgtm[1]     )) >> 2;
     uint8_t  month =  (pgtm.pgtm[1] & 0x03) <<2 | (pgtm.pgtm[2] >> 6);
     uint8_t  day   =  (pgtm.pgtm[2] & 0x3E) >>1;
     uint8_t  hour  =  (pgtm.pgtm[2] & 0x01) <<4 | (pgtm.pgtm[3] >> 4);
     uint8_t  min   =  (pgtm.pgtm[3] & 0x0F) <<2 | (pgtm.pgtm[4] >> 6);
     uint8_t  sec   =  (pgtm.pgtm[4] & 0x3F);
-    tm->tm_year=year-1900;
-    tm->tm_mon=month-1;
-    tm->tm_mday=day;
-    tm->tm_hour=hour;
-    tm->tm_min=min;
-    tm->tm_sec=sec;
-    tm->tm_isdst=-1; /*Auto calc DST offset.*/
-    char date_str[32];
-    strftime(date_str,sizeof(date_str),"%F %T",tm); //locale = %x %X
-    printf("date: %s\n",date_str);
-    return true;
+    if (year) {
+        tm->tm_year=year-1900;
+        tm->tm_mon=month-1;
+        tm->tm_mday=day;
+        tm->tm_hour=hour;
+        tm->tm_min=min;
+        tm->tm_sec=sec;
+        tm->tm_isdst=-1; /*Auto calc DST offset.*/
+
+        char date_str[32];
+        strftime(date_str,sizeof(date_str),"%F %T",tm); //locale = %x %X
+        printf("date : %s\n",date_str);
+        ret=true;
+    } else {
+        printf("date : not set\n");
+    }
+    return ret;
+}
+
+/*
+ * XXX: This assumes the programs occur linearly within
+ * the default program sets. This is accurate at least for
+ * my camcorder, which creates a program set per day, and
+ * auto sets the label to the date (which can be relabled).
+ * This is also valid fot the LG camcorder and Nero generated
+ * DVD-VR images I was sent, which create a program set for
+ * each program.
+ */
+char* find_program_text_info(psi_gi_t* psi_gi, int program)
+{
+    int ps;
+    for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
+        psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
+        uint16_t start_prog_num = ntohs(psi->id);
+        uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
+        if ((program >= start_prog_num) && (program <= end_prog_num)) {
+            return psi->label;
+        }
+    }
+    return "Couldn't find program label. Please report";
 }
 
 /*********************************************************************************
  *
  *********************************************************************************/
 
+unsigned required_program=0; /* process all programs by default */
+const char* ifo_name=NULL;
+const char* vro_name=NULL;
+
+void usage(char** argv)
+{
+    fprintf(stderr,"Usage: %s [-p #] VR_MANGR.IFO [VR_MOVIE.VRO]\n"
+                    "\n"
+                    "If -p # is specified, then only that program is processed\n"
+                    "If the VRO file is specified, the component programs are\n"
+                    "extracted to the current directory\n",argv[0]);
+    exit(EXIT_FAILURE);
+}
+
+void get_options(int argc, char** argv)
+{
+    int opt;
+    while ((opt = getopt(argc, argv, "p:")) != -1) {
+        switch (opt) {
+        case 'p':
+            required_program = atoi(optarg);
+            break;
+        default: /* '?' */
+            usage(argv);
+            break;
+        }
+    }
+    if (optind >= argc) {
+        usage(argv);
+    }
+    ifo_name=argv[optind++];
+
+    if (optind < argc) {
+        vro_name=argv[optind++];
+    }
+}
+
 int main(int argc, char** argv)
 {
     setlocale(LC_ALL,"");
 
-    if (argc==1) {
-        fprintf(stderr,"Usage: %s VR_MANGR.IFO [VR_MOVIE.VRO]\n"
-                       "\n"
-                       "If the VRO file is specified, the component programs are\n"
-                       "extracted to the current directory\n",argv[0]);
-        exit(EXIT_FAILURE);
-    }
+    get_options(argc, argv);
 
-    int fd=open(argv[1],O_RDONLY);
+    int fd=open(ifo_name,O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr,"Error opening [%s] (%m)\n",argv[1]);
+        fprintf(stderr,"Error opening [%s] (%m)\n",ifo_name);
         exit(EXIT_FAILURE);
     }
 
     int vro_fd=-1;
-    if (argc==3) {
-        vro_fd=open(argv[2],O_RDONLY);
+    if (vro_name) {
+        vro_fd=open(vro_name,O_RDONLY);
         if (vro_fd == -1) {
-            fprintf(stderr,"Error opening [%s] (%m)\n",argv[2]);
+            fprintf(stderr,"Error opening [%s] (%m)\n",vro_name);
             exit(EXIT_FAILURE);
         }
 #ifdef POSIX_FADV_SEQUENTIAL
@@ -459,6 +566,10 @@ int main(int argc, char** argv)
     NTOHL(rtav_vmgi_ptr->mat.pgit_sa);
     pgiti_t* pgiti = (pgiti_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.pgit_sa);
     NTOHL(pgiti->pgit_ea);
+
+    NTOHL(rtav_vmgi_ptr->mat.def_psi_sa);
+    psi_gi_t *def_psi_gi = (psi_gi_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.def_psi_sa);
+
 #ifndef NDEBUG
     printf("Number of info tables for VRO: %d\n",pgiti->nr_of_pgi);
     printf("Number of vob formats: %d\n",pgiti->nr_of_vob_formats);
@@ -494,21 +605,22 @@ int main(int argc, char** argv)
     pgi_gi_t* pgi_gi = (pgi_gi_t*) vob_format;
     NTOHS(pgi_gi->nr_of_programs);
     printf("\nNumber of programs: %d\n", pgi_gi->nr_of_programs);
+    if (required_program && required_program>pgi_gi->nr_of_programs) {
+        fprintf(stderr,"Error: couldn't find specified program (%d)\n", required_program);
+        exit(EXIT_FAILURE);
+    }
 
+    struct tm now_tm;
+    time_t now=time(0);
+    (void) gmtime_r(&now, &now_tm);//used if no timestamp in program
     int program;
     typedef uint32_t vvobi_sa_t;
     vvobi_sa_t* vvobi_sa=(vvobi_sa_t*)(pgi_gi+1);
     for (program=0; program<pgi_gi->nr_of_programs; program++) {
 
-        int vob_fd=-1;
-        char vob_name[32];
-        if (vro_fd!=-1) {
-            snprintf(vob_name,sizeof(vob_name),"program_%d.vob",program+1);
-            vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
-            if (vob_fd == -1) {
-                fprintf(stderr,"Error opening [%s] (%m)\n",vob_name);
-                exit(EXIT_FAILURE);
-            }
+        if (required_program && program+1!=required_program) {
+            vvobi_sa++;
+            continue;
         }
 
         NTOHL(*vvobi_sa);
@@ -519,8 +631,24 @@ int main(int argc, char** argv)
 #endif//NDEBUG
         vvob_t* vvob = (vvob_t*) (((uint8_t*)pgiti) + *vvobi_sa);
         struct tm tm;
-        if (!parse_pgtm(vvob->vob_timestamp,&tm)) {
-            fprintf(stderr,"Error parsing ptm\n");
+        char date_str[32]; //use date to give unique filename
+        if (parse_pgtm(vvob->vob_timestamp,&tm)) {
+            strftime(date_str,sizeof(date_str),"%F_%T",&tm);
+        } else { //use now + program num to give unique name
+            strftime(date_str,sizeof(date_str),"%F_%T",&now_tm);
+            int datelen=strlen(date_str);
+            (void) snprintf(date_str+datelen, sizeof(date_str)-datelen, "_%d", program+1);
+        }
+
+        int vob_fd=-1;
+        char vob_name[32];
+        if (vro_fd!=-1) {
+            (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",date_str);
+            vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+            if (vob_fd == -1) {
+                fprintf(stderr,"Error opening [%s] (%m)\n",vob_name);
+                exit(EXIT_FAILURE);
+            }
         }
 
         if (vob_types>1) {
@@ -541,10 +669,10 @@ int main(int argc, char** argv)
         NTOHS(vobu_map->time_offset);
         NTOHL(vobu_map->vob_offset);
 #ifndef NDEBUG
-        printf("# time infos:   %"PRIu16"\n",vobu_map->nr_of_time_info);
-        printf("# VOBUs: %"PRIu16"\n",vobu_map->nr_of_vobu_info);
+        printf("num time infos:   %"PRIu16"\n",vobu_map->nr_of_time_info);
+        printf("num VOBUs: %"PRIu16"\n",vobu_map->nr_of_vobu_info);
         printf("time offset:      %"PRIu16"\n",vobu_map->time_offset); /* What units? */
-        printf("vob offset:     %'"PRIu64"\n",vobu_map->vob_offset*DVD_SECTOR_SIZE);  /* offset in the VRO file of the VOB */
+        printf("vob offset:     %"PRIu32"*%d\n",vobu_map->vob_offset,DVD_SECTOR_SIZE);  /* offset in the VRO file of the VOB */
 #endif//NDEBUG
         if (vro_fd!=-1) {
             if (lseek(vro_fd, vobu_map->vob_offset*DVD_SECTOR_SIZE, SEEK_SET)==(off_t)-1) {
@@ -578,7 +706,8 @@ int main(int argc, char** argv)
             touch(vob_name, &tm);
         }
 
-        printf("size: %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
+        printf("size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
+        printf("label: %s\n", find_program_text_info(def_psi_gi, program+1));
 
         vvobi_sa++;
     }

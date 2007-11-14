@@ -1,5 +1,5 @@
 NAME=dvd-vr
-VERSION=0.3
+VERSION=0.4
 TARFILE=$(NAME)-$(VERSION).tar.gz
 
 CC=gcc
