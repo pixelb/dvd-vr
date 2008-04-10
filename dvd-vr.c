@@ -3,7 +3,7 @@
  dvd-vr.c     Identify and optionally copy the individual programs
               from a DVD-VR format disc
 
- Copyright © 2007 by Pádraig Brady <P@draigBrady.com>
+ Copyright © 2007-2008 Pádraig Brady <P@draigBrady.com>
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -17,15 +17,10 @@
 
  You should have received a copy of the GNU General Public License
  along with this program; if not, write to the Free Software
- Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.
 */
 
 /*
-
-Build:
-
-    gcc -DNDEBUG -std=c99 -Wall -Wpadded dvd-vr.c -o dvd-vr
-
 
 Usage:
 
@@ -56,40 +51,15 @@ Notes:
 
     Doesn't parse play list index
     Doesn't parse still image info
+    Doesn't parse chapters
     Doesn't fixup MPEG time data
 
 
 Requirements:
 
     gcc >= 2.95
-    glibc >= 2.3.3
-    Tested on linux
-
-
-Changelog:
-
-    V0.1:       16 Feb 2007     Initial release
-    V0.2:       29 Mar 2007     Portability fixes
-                                  Fixed up comments to support more compilers
-                                  Removed linux specific mremap() call
-                                  Don't try to use posix_fadvise() where not available
-                                  OS X also defines NTOH[LS], so undef first
-                                  Use utimes(filename) rather than futimes(fd)
-    V0.3:       18 Jun 2007     তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>:
-                                  Fix random timestamp errors due to uninitialised tm_isdst.
-    V0.4:       14 Nov 2007     P@draigBrady.com:
-                                  Allow specifiying a particular program to process,
-                                  rather than all programs.
-                                Aaron Binns <aaron@randomshiznat.com>:
-                                  Report 480x480 resolution discs, and do better reporting
-                                  for unknown resolutions.
-                                Peter Van Hove <Peter@Smart-Projects.net>:
-                                  support program label extraction with example code
-                                  and nero generated disc images.
-                                Craig T. Snydal <ctsnydal@cantab.net>:
-                                Rafa Couto <rafacouto@gmail.com>:
-                                  Generate globally unique filenames using timestamps,
-                                  rather than just program_1.vob, program_2.vob, ...
+    glibc >= 2.3.3 on linux
+    Tested on linux, CYGWIN and Mac OS X
 */
 
 #define _GNU_SOURCE           /* for posix_fadvise() and futimes() */
@@ -110,6 +80,24 @@ Changelog:
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <errno.h>
+
+#if defined(__CYGWIN__ ) || defined(_WIN32) /* windos doesn't like : in filenames */
+#define TIMESTAMP_FMT "%F_%H-%M-%S"
+#else
+#define TIMESTAMP_FMT "%F_%T" /* keep : in filenames for backward compat */
+#endif
+
+#ifdef HAVE_ICONV
+/* FIXME: SHIFT_JIS is the only non ascii I've seen in the wild.
+ * To support others we'll need to find where/how the encoding
+ * is indicated on the disc. If we can't find this, perhaps
+ * we could autodetect? */
+#define SECONDARY_CHARSET "SHIFT_JIS"
+
+#include <langinfo.h>
+#include <iconv.h>
+#endif
 
 /*********************************************************************************
  *                          support routines
@@ -134,6 +122,7 @@ typedef enum {
     PERCENT_END
 } percent_control_t;
 
+static
 void percent_display(percent_control_t percent_control, unsigned int percent)
 {
     static int point;
@@ -163,7 +152,7 @@ void percent_display(percent_control_t percent_control, unsigned int percent)
 
 /* Set access and modfied times of filename
    to the specified broken down time */
-int touch(const char* filename, struct tm* tm)
+static int touch(const char* filename, struct tm* tm)
 {
     time_t ut = mktime(tm);
     struct timeval tv[2]={ {.tv_sec=ut, .tv_usec=0}, {.tv_sec=ut, .tv_usec=0} };
@@ -175,6 +164,7 @@ int touch(const char* filename, struct tm* tm)
   putting more than blocks*block_size in the system cache.
   Therefore you will probably want to call this function repeatedly.
  */
+static
 int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
     /* TODO: mmap/madvise instead of read/fadvise ? What about splice? */
 
@@ -182,11 +172,11 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
     int block;
     for (block=0; block<blocks; block++) {
         if (read(src_fd,buf,sizeof(buf)) != sizeof(buf)) {
-            fprintf(stderr,"Error reading from SRC [%m]\n");
+            fprintf(stderr,"Error reading from SRC [%s]\n", strerror(errno));
             return -1;
         }
         if (write(dst_fd,buf,sizeof(buf)) != sizeof(buf)) {
-            fprintf(stderr,"Error writing to DST [%m]\n");
+            fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
             return -1;
         }
     }
@@ -207,6 +197,30 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
 #endif //POSIX_FADV_DONTNEED
 
     return 0;
+}
+
+static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstlen)
+{
+    bool ret=false;
+#ifdef HAVE_ICONV
+    iconv_t cd = iconv_open (nl_langinfo(CODESET), SECONDARY_CHARSET);
+    if (cd != (iconv_t)-1) {
+        if (iconv (cd, (ICONV_CONST char**)&src, &srclen, &dst, &dstlen) != (size_t)-1) {
+            if (iconv (cd, NULL, NULL, &dst, &dstlen) != (size_t)-1) { /* terminate string */
+                ret=true;
+            }
+        } else {
+            fprintf(stderr,"Error converting from %s to %s\n",
+                    SECONDARY_CHARSET, nl_langinfo(CODESET));
+        }
+        iconv_close (cd);
+    } else {
+        fprintf(stderr,
+                "Error converting from %s (not supported by this system)\n",
+                SECONDARY_CHARSET);
+    }
+#endif
+    return ret;
 }
 
 /*********************************************************************************
@@ -323,20 +337,25 @@ typedef struct  {
     uint8_t  data1;
     uint8_t  data2;
     uint16_t nr_of_programs;  /* Num programs in program set */
-    char     label[128];      /* contains ascii at start */
+    char     label[64];       /* ASCII. Might not be NUL terminated */
+    char     title[64];       /* Could be same as label, NUL, or another charset */
     uint16_t data3;
     uint16_t id;              /* corresponding program set number */
     char     data4[6];
 } PACKED psi_t;
 
-bool parse_audio_attr(audio_attr_t audio_attr0)
+static bool parse_audio_attr(audio_attr_t audio_attr0)
 {
     int coding   = (audio_attr0.audio_attr[0] & 0xE0)>>5;
     int channels = (audio_attr0.audio_attr[1] & 0x0F);
-    /* audio_attr0.audio_attr[2] = 7 for my camcorder ? */
+    /* audio_attr0.audio_attr[2] = 7 for my camcorder. Is this 192Kbit? */
+    /* audio_attr0.audio_attr[2] = 9 for Masato Nunokawa's disc? */
 
     if (channels < 8) {
         printf ("audio_channs: %d\n",channels+1);
+    } else if (channels == 9) {
+        /* According to Masato Nunokawa's disc */
+        printf ("audio_channs: 2 (mono)\n");
     } else {
         return false;
     }
@@ -358,7 +377,7 @@ bool parse_audio_attr(audio_attr_t audio_attr0)
     return true;
 }
 
-bool parse_video_attr(uint16_t video_attr)
+static bool parse_video_attr(uint16_t video_attr)
 {
     int resolution  = (video_attr & 0x0038) >>  3;
     int aspect      = (video_attr & 0x0C00) >> 10;
@@ -421,7 +440,7 @@ bool parse_video_attr(uint16_t video_attr)
     return true;
 }
 
-bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
+static bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 {
     bool ret=false;
 
@@ -451,15 +470,15 @@ bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 }
 
 /*
- * XXX: This assumes the programs occur linearly within
+ * FIXME: This assumes the programs occur linearly within
  * the default program sets. This is accurate at least for
  * my camcorder, which creates a program set per day, and
  * auto sets the label to the date (which can be relabled).
- * This is also valid fot the LG camcorder and Nero generated
+ * This is also valid for the LG camcorder and Nero generated
  * DVD-VR images I was sent, which create a program set for
  * each program.
  */
-char* find_program_text_info(psi_gi_t* psi_gi, int program)
+static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
 {
     int ps;
     for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
@@ -467,10 +486,34 @@ char* find_program_text_info(psi_gi_t* psi_gi, int program)
         uint16_t start_prog_num = ntohs(psi->id);
         uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
         if ((program >= start_prog_num) && (program <= end_prog_num)) {
-            return psi->label;
+            return psi;
         }
     }
-    return "Couldn't find program label. Please report";
+    return (psi_t*)NULL;
+}
+
+static void print_label(const psi_t* psi)
+{
+    const char* label=psi->label;
+
+    /* UTF-8 can have up to 6 bytes per char + space for \0 */
+    char title_local[sizeof(psi->title)*6+1];
+    const char* title = psi->title;
+    if (*title) {
+        char title_copy[sizeof(psi->title)+1]; /* Copy as may not be NUL terminated */
+        title_copy[sizeof(title_copy)-1] = '\0';
+        (void) strncpy(title_copy, title, sizeof(psi->title));
+        size_t srclen = strlen(title_copy) + 1; /* convert NUL also */
+        if (text_convert(title_copy, srclen, title_local, sizeof(title_local))) {
+            if (strncmp(title_local, label, sizeof(psi->label))) { /* if title != label */
+                printf("title: %s\n", title_local);
+            }
+        }
+    }
+
+    if (*label && strcmp(label, " ")) {
+        printf("label: %.*s\n", (int)sizeof(psi->label), label);
+    }
 }
 
 /*********************************************************************************
@@ -481,7 +524,7 @@ unsigned required_program=0; /* process all programs by default */
 const char* ifo_name=NULL;
 const char* vro_name=NULL;
 
-void usage(char** argv)
+static void usage(char** argv)
 {
     fprintf(stderr,"Usage: %s [-p #] VR_MANGR.IFO [VR_MOVIE.VRO]\n"
                     "\n"
@@ -491,7 +534,7 @@ void usage(char** argv)
     exit(EXIT_FAILURE);
 }
 
-void get_options(int argc, char** argv)
+static void get_options(int argc, char** argv)
 {
     int opt;
     while ((opt = getopt(argc, argv, "p:")) != -1) {
@@ -522,7 +565,7 @@ int main(int argc, char** argv)
 
     int fd=open(ifo_name,O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr,"Error opening [%s] (%m)\n",ifo_name);
+        fprintf(stderr,"Error opening [%s] (%s)\n", ifo_name, strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -530,7 +573,7 @@ int main(int argc, char** argv)
     if (vro_name) {
         vro_fd=open(vro_name,O_RDONLY);
         if (vro_fd == -1) {
-            fprintf(stderr,"Error opening [%s] (%m)\n",vro_name);
+            fprintf(stderr,"Error opening [%s] (%s)\n", vro_name, strerror(errno));
             exit(EXIT_FAILURE);
         }
 #ifdef POSIX_FADV_SEQUENTIAL
@@ -540,7 +583,7 @@ int main(int argc, char** argv)
 
     rtav_vmgi_t* rtav_vmgi_ptr=mmap(0,sizeof(rtav_vmgi_t),PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
     if (rtav_vmgi_ptr == MAP_FAILED) {
-        fprintf(stderr,"Failed to MMAP ifo file (%m)\n");
+        fprintf(stderr,"Failed to MMAP ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
     if (strncmp("DVD_RTR_VMG0",rtav_vmgi_ptr->mat.id,sizeof(rtav_vmgi_ptr->mat.id))) {
@@ -550,12 +593,12 @@ int main(int argc, char** argv)
 
     uint32_t vmg_size = NTOHL(rtav_vmgi_ptr->mat.vmg_ea) + 1;
     if (munmap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t)!=0)) {
-        fprintf(stderr,"Failed to unmap ifo file (%m)\n");
+        fprintf(stderr,"Failed to unmap ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
     rtav_vmgi_ptr=mmap(0,vmg_size,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
     if (rtav_vmgi_ptr == MAP_FAILED) {
-        fprintf(stderr,"Failed to re MMAP ifo file (%m)\n");
+        fprintf(stderr,"Failed to re MMAP ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -573,7 +616,7 @@ int main(int argc, char** argv)
 #ifndef NDEBUG
     printf("Number of info tables for VRO: %d\n",pgiti->nr_of_pgi);
     printf("Number of vob formats: %d\n",pgiti->nr_of_vob_formats);
-    printf("pgit_ea: %08X\n",pgiti->pgit_ea);
+    printf("pgit_ea: %08"PRIX32"\n",pgiti->pgit_ea);
 #endif//NDEBUG
 
     if (pgiti->nr_of_pgi == 0) {
@@ -626,28 +669,41 @@ int main(int argc, char** argv)
         NTOHL(*vvobi_sa);
 
         putchar('\n');
+        psi_t* psi=find_program_text_info(def_psi_gi, program+1);
+        if (psi) {
+            print_label(psi);
+        } else {
+            printf("label: Couldn't find. Please report.\n");
+        }
+
 #ifndef NDEBUG
-        printf("VVOB info (%d) address: %d\n",program+1,*vvobi_sa);
+        printf("VVOB info (%d) address: %"PRIu32"\n",program+1,*vvobi_sa);
 #endif//NDEBUG
         vvob_t* vvob = (vvob_t*) (((uint8_t*)pgiti) + *vvobi_sa);
         struct tm tm;
         char date_str[32]; //use date to give unique filename
         if (parse_pgtm(vvob->vob_timestamp,&tm)) {
-            strftime(date_str,sizeof(date_str),"%F_%T",&tm);
+            strftime(date_str,sizeof(date_str),TIMESTAMP_FMT,&tm);
         } else { //use now + program num to give unique name
-            strftime(date_str,sizeof(date_str),"%F_%T",&now_tm);
+            strftime(date_str,sizeof(date_str),TIMESTAMP_FMT,&now_tm);
             int datelen=strlen(date_str);
-            (void) snprintf(date_str+datelen, sizeof(date_str)-datelen, "_%d", program+1);
+            (void) snprintf(date_str+datelen, sizeof(date_str)-datelen, "#%03d", program+1);
         }
 
         int vob_fd=-1;
         char vob_name[32];
         if (vro_fd!=-1) {
-            (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",date_str);
+            (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",date_str); /* 1 char too long for ls -l in 80 cols :( */
             vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+            if (errno == EEXIST) { /* JVC DVD recorder can generate duplicate timestamps at least :( */
+              /* FIXME: The second time ripping a disc will duplicate the first VOB with duplicate timestamp.
+               * Would need to scan all program info first and change format if any duplicate timestamps. */
+              (void) snprintf(vob_name,sizeof(vob_name),"%s#%03d.vob",date_str, program+1);
+              vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+            }
             if (vob_fd == -1) {
-                fprintf(stderr,"Error opening [%s] (%m)\n",vob_name);
-                exit(EXIT_FAILURE);
+                fprintf(stderr,"Error opening [%s] (%s)\n", vob_name, strerror(errno));
+                continue;
             }
         }
 
@@ -676,7 +732,7 @@ int main(int argc, char** argv)
 #endif//NDEBUG
         if (vro_fd!=-1) {
             if (lseek(vro_fd, vobu_map->vob_offset*DVD_SECTOR_SIZE, SEEK_SET)==(off_t)-1) {
-                fprintf(stderr,"Error seeking within VRO [%m]\n");
+                fprintf(stderr,"Error seeking within VRO [%s]\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
         }
@@ -707,7 +763,6 @@ int main(int argc, char** argv)
         }
 
         printf("size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
-        printf("label: %s\n", find_program_text_info(def_psi_gi, program+1));
 
         vvobi_sa++;
     }

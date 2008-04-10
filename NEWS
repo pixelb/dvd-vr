@@ -1,0 +1,57 @@
+V0.1    16-02-2007
+
+    Initial release
+
+V0.2    29-03-2007
+
+    Portability fixes
+      Fixed up comments to support more compilers
+      Removed linux specific mremap() call
+      Don't try to use posix_fadvise() where not available
+      OS X also defines NTOH[LS], so undef first
+      Use utimes(filename) rather than futimes(fd)
+
+V0.3    18-06-2007
+
+    তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>:
+      Fix random timestamp errors due to uninitialised tm_isdst.
+
+V0.4    14-11-2007
+
+    P@draigBrady.com:
+      Allow specifiying a particular program to process,
+      rather than all programs.
+    Aaron Binns <aaron@randomshiznat.com>:
+      Report 480x480 resolution discs, and do better reporting
+      for unknown resolutions.
+    Peter Van Hove <Peter@Smart-Projects.net>:
+      support program label extraction with example code
+      and nero generated disc images.
+    Craig T. Snydal <ctsnydal@cantab.net>:
+    Rafa Couto <rafacouto@gmail.com>:
+      Generate globally unique filenames using timestamps,
+      rather than just program_1.vob, program_2.vob, ...
+
+V0.5    09-04-2008
+
+    Javier Sedano <Javier.Sedano@gmail.com>:
+      Tweaks to support the CYGWIN environment.
+    Masato Nunokawa <masato.nunokawa@gmail.com>:
+      Handle non ASCII encoded labels (e.g. in Japanese Kanji).
+      Provided disc images to test audio attribute and Kanji.
+      Mac OS X testing.
+    Kyosuke Tokoro <altair8800@livedoor.com>:
+      Provided Kanji encoded disc images to test.
+      Handle case where programs can have duplicate timestamps.
+      Tweaks to support compiler optimization.
+      Fix FSF postal address.
+    P@draigBrady.com:
+      Support 2 channel mono audio attribute.
+      Portability support for iconv() usage.
+      Don't exit if error opening a particular vob file.
+
+V0.5.1  10-04-2008
+
+    P@draigBrady.com
+      Fix error pointed out by Kyosuke Tokoro where random
+      trailing characters could be printed after each title.
