@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.5.1
+VERSION := 0.6
 TARFILE := $(NAME)-$(VERSION).tar.gz
 HOST := $(shell uname | tr '[:lower:]' '[:upper:]')
 CC := gcc

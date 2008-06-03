@@ -1,0 +1,9 @@
+BUILD:
+  make
+
+RUN:
+  ./dvd-vr
+
+INSTALL in $PATH:
+  sudo mkdir -p /usr/local/bin
+  sudo cp dvd-vr /usr/local/bin

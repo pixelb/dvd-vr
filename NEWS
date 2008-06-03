@@ -55,3 +55,12 @@ V0.5.1  10-04-2008
     P@draigBrady.com
       Fix error pointed out by Kyosuke Tokoro where random
       trailing characters could be printed after each title.
+
+V0.6    03-06-2008
+
+    P@draigBrady.com
+      Support text encoding of ISO-8859-1 as well as SHIFT-JIS.
+      Support finding labels on discs that don't write full
+      info about programs contained in each program set.
+      Skip & report unreadable blocks rather than just exiting.
+      Fix crash when skipping already existing vob files.

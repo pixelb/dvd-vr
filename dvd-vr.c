@@ -89,15 +89,10 @@ Requirements:
 #endif
 
 #ifdef HAVE_ICONV
-/* FIXME: SHIFT_JIS is the only non ascii I've seen in the wild.
- * To support others we'll need to find where/how the encoding
- * is indicated on the disc. If we can't find this, perhaps
- * we could autodetect? */
-#define SECONDARY_CHARSET "SHIFT_JIS"
-
 #include <langinfo.h>
 #include <iconv.h>
 #endif
+const char* disc_charset;
 
 /*********************************************************************************
  *                          support routines
@@ -122,23 +117,33 @@ typedef enum {
     PERCENT_END
 } percent_control_t;
 
+/* Only use display_char!=0 to set non default progress chars like errors etc. */
 static
-void percent_display(percent_control_t percent_control, unsigned int percent)
+void percent_display(percent_control_t percent_control, unsigned int percent, int display_char)
 {
     static int point;
     #define POINTS 20
+    #define DEFAULT_PROGRESS_CHAR '.'
+    static char chars[POINTS+1];
 
     switch (percent_control) {
     case PERCENT_START: {
         point=0;
-        printf("[%*s]\r[",POINTS,"");
+        printf("[%*s]\r",POINTS,"");
+        memset(chars, ' ', POINTS);
+        *(chars+POINTS)='\0';
         break;
     }
     case PERCENT_UPDATE: {
         int newpoint=percent/(100/POINTS);
         int i;
-        for (i=0; i<newpoint-point; i++)
-            putchar('.');
+        if (display_char && (display_char != DEFAULT_PROGRESS_CHAR))
+            for (i=point; i<=newpoint && i<POINTS; i++)
+                chars[i]=display_char;
+        for (i=0; i<newpoint; i++)
+            if (chars[i] == ' ')
+                chars[i] = DEFAULT_PROGRESS_CHAR;
+        printf("\r[%s]",chars);
         point=newpoint;
         break;
     }
@@ -171,13 +176,17 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
     uint8_t buf[block_size];
     int block;
     for (block=0; block<blocks; block++) {
-        if (read(src_fd,buf,sizeof(buf)) != sizeof(buf)) {
-            fprintf(stderr,"Error reading from SRC [%s]\n", strerror(errno));
+        int bytes_read = read(src_fd,buf,sizeof(buf));
+        if (bytes_read != sizeof(buf)) {
+#ifndef NDEBUG
+            if (bytes_read<0) /* otherwise file truncated */
+                fprintf(stderr,"Error reading from SRC [%s]\n", strerror(errno));
+#endif//NDEBUG
             return -1;
         }
         if (write(dst_fd,buf,sizeof(buf)) != sizeof(buf)) {
             fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
-            return -1;
+            return -2;
         }
     }
 
@@ -203,7 +212,7 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
 {
     bool ret=false;
 #ifdef HAVE_ICONV
-    iconv_t cd = iconv_open (nl_langinfo(CODESET), SECONDARY_CHARSET);
+    iconv_t cd = iconv_open (nl_langinfo(CODESET), disc_charset);
     if (cd != (iconv_t)-1) {
         if (iconv (cd, (ICONV_CONST char**)&src, &srclen, &dst, &dstlen) != (size_t)-1) {
             if (iconv (cd, NULL, NULL, &dst, &dstlen) != (size_t)-1) { /* terminate string */
@@ -211,13 +220,13 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
             }
         } else {
             fprintf(stderr,"Error converting from %s to %s\n",
-                    SECONDARY_CHARSET, nl_langinfo(CODESET));
+                    disc_charset, nl_langinfo(CODESET));
         }
         iconv_close (cd);
     } else {
         fprintf(stderr,
                 "Error converting from %s (not supported by this system)\n",
-                SECONDARY_CHARSET);
+                disc_charset);
     }
 #endif
     return ret;
@@ -256,7 +265,9 @@ typedef struct {
         uint16_t version;     /*specification version*/
         /* 34. Different from DVD-Video from here */
         uint8_t  zero2[30];
-        uint8_t  data[34];
+        uint8_t  data1[3];
+        uint8_t  txt_encoding;/*as per VideoTextDataUsage.pdf*/
+        uint8_t  data2[30];
         uint8_t  zero3[158];
         /* 256 */
         uint32_t pgit_sa;    /*program info table start address*/
@@ -343,6 +354,36 @@ typedef struct  {
     uint16_t id;              /* corresponding program set number */
     char     data4[6];
 } PACKED psi_t;
+
+static const char* parse_txt_encoding(uint8_t txt_encoding)
+{
+/* from the VideoTextDataUsage.pdf available at dvdforum.org we have:
+     01h : ISO 646
+     10h : JIS Roman[14]*and JIS Kanji1990[168]*
+     11h : ISO 8859-1
+     12h : JIS Roman[14]*and JIS Katakana[13]*including Shift JIS Kanji
+   Also Nero generates discs with 00h, so I'll assume this is ASCII.
+*/
+
+    const char* charset="Unknown";
+
+    switch (txt_encoding) {
+    case 0x00: charset="ASCII"; break;
+    case 0x01: charset="ISO646-JP"; break; /* ?? */
+    case 0x10: charset="JIS_C6220-1969-RO"; break; /* ?? */
+    case 0x11: charset="ISO_8859-1"; break;
+    case 0x12: charset="SHIFT_JIS"; break;
+    }
+
+    if (!strcmp("Unknown", charset)) {
+        printf("text encoding: %s", charset);
+        printf( ". (%02X). Please report this number and actual text encoding.\n", txt_encoding );
+        charset="ISO_8859-15"; /* Shouldn't give an error at least */
+    }
+
+    return charset;
+}
+
 
 static bool parse_audio_attr(audio_attr_t audio_attr0)
 {
@@ -483,10 +524,18 @@ static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
     int ps;
     for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
         psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
-        uint16_t start_prog_num = ntohs(psi->id);
-        uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
-        if ((program >= start_prog_num) && (program <= end_prog_num)) {
-            return psi;
+        if (psi_gi->nr_of_psi == ntohs(psi_gi->nr_of_programs)) {
+            /* I've found the start_prog_num and end_prog_num is not present
+             * on some discs. Therefore do this simpler lookup first. */
+            if (ps == program-1) {
+                return psi;
+            }
+        } else {
+            uint16_t start_prog_num = ntohs(psi->id);
+            uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
+            if ((program >= start_prog_num) && (program <= end_prog_num)) {
+                return psi;
+            }
         }
     }
     return (psi_t*)NULL;
@@ -606,6 +655,8 @@ int main(int argc, char** argv)
     rtav_vmgi_ptr->mat.version &= 0x00FF;
     printf("format: DVD-VR V%d.%d\n",rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
 
+    disc_charset=parse_txt_encoding(rtav_vmgi_ptr->mat.txt_encoding);
+
     NTOHL(rtav_vmgi_ptr->mat.pgit_sa);
     pgiti_t* pgiti = (pgiti_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.pgit_sa);
     NTOHL(pgiti->pgit_ea);
@@ -703,6 +754,7 @@ int main(int argc, char** argv)
             }
             if (vob_fd == -1) {
                 fprintf(stderr,"Error opening [%s] (%s)\n", vob_name, strerror(errno));
+                vvobi_sa++;
                 continue;
             }
         }
@@ -739,25 +791,58 @@ int main(int argc, char** argv)
         vobu_info_t* vobu_info = (vobu_info_t*) (((uint8_t*)(vobu_map+1)) + vobu_map->nr_of_time_info*sizeof(time_info_t));
         int vobus;
         uint64_t tot=0;
+        int display_char;
+        int error=0;
         if (vro_fd != -1) {
-            percent_display(PERCENT_START,0);
+            percent_display(PERCENT_START, 0, 0);
         }
         for (vobus=0; vobus<vobu_map->nr_of_vobu_info; vobus++) {
             uint16_t vobu_size = *(uint16_t*)(&vobu_info->vobu_info[1]);
             NTOHS(vobu_size); vobu_size&=0x03FF;
             if (vro_fd != -1) {
-                if (stream_data(vro_fd, vob_fd, vobu_size, DVD_SECTOR_SIZE) == -1) {
+                off_t curr_offset = lseek(vro_fd, 0, SEEK_CUR);
+                if (curr_offset == (off_t)-1) {
+                    fprintf(stderr,"Error determining VRO offset [%s]\n", strerror(errno));
                     exit(EXIT_FAILURE);
+                }
+                int ret = stream_data(vro_fd, vob_fd, vobu_size, DVD_SECTOR_SIZE);
+                if (ret == -2) { /* write error */
+                    exit(EXIT_FAILURE);
+                } else if (ret == -1) { /* read error */
+                    display_char='X';
+                    error=1;
+                    off_t new_offset = lseek(vro_fd, 0, SEEK_CUR);
+                    if (new_offset == (off_t)-1) {
+                        fprintf(stderr,"Error determining VRO offset [%s]\n", strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
+                    off_t skip_len = (curr_offset + vobu_size*DVD_SECTOR_SIZE) - new_offset;
+                    if (skip_len) {
+#ifndef NDEBUG
+                        fprintf(stderr,"Skipping %"PRIdMAX" bytes\n", skip_len);
+                        /* Note we mark the whole VOBU as bad not just this skip len */
+#endif//NDEBUG
+                        if (lseek(vro_fd, skip_len, SEEK_CUR) == (off_t)-1) {
+                            fprintf(stderr,"Error skipping in VRO [%s]\n", strerror(errno));
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                } else {
+                    display_char=0; /* default */
                 }
 
                 int percent=((vobus+1)*100)/vobu_map->nr_of_vobu_info;
-                percent_display(PERCENT_UPDATE, percent);
+                percent_display(PERCENT_UPDATE, percent, display_char);
             }
             tot+=vobu_size;
             vobu_info++;
         }
         if (vro_fd != -1) {
-            percent_display(PERCENT_END, 0);
+            if (!error) {
+                percent_display(PERCENT_END, 0, 0);
+            } else {
+                putchar('\n');
+            }
             close(vob_fd);
             touch(vob_name, &tm);
         }
