@@ -82,7 +82,7 @@ Requirements:
 #include <sys/time.h>
 #include <errno.h>
 
-#if defined(__CYGWIN__ ) || defined(_WIN32) /* windos doesn't like : in filenames */
+#if defined(__CYGWIN__) || defined(_WIN32) /* windos doesn't like : in filenames */
 #define TIMESTAMP_FMT "%F_%H-%M-%S"
 #else
 #define TIMESTAMP_FMT "%F_%T" /* keep : in filenames for backward compat */
@@ -105,7 +105,7 @@ void hexdump(const void* data, int len)
     const unsigned char* bytes=data;
     for (i=0; i<len; i++) {
         printf("%02X ",bytes[i]);
-        if ((i+1)%16 ==0) printf ("\n");
+        if ((i+1)%16 == 0) printf("\n");
     }
     if (len%16) putchar('\n');
 }
@@ -350,8 +350,8 @@ typedef struct  {
     uint16_t nr_of_programs;  /* Num programs in program set */
     char     label[64];       /* ASCII. Might not be NUL terminated */
     char     title[64];       /* Could be same as label, NUL, or another charset */
-    uint16_t data3;
-    uint16_t id;              /* corresponding program set number */
+    uint16_t id_2;            /* On LG V1.1 discs this is program set number */
+    uint16_t id;              /* ID of first program in this program set */
     char     data4[6];
 } PACKED psi_t;
 
@@ -522,16 +522,23 @@ static bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
 {
     int ps;
+    uint16_t programs_total = 0;
     for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
         psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
         if (psi_gi->nr_of_psi == ntohs(psi_gi->nr_of_programs)) {
-            /* I've found the start_prog_num and end_prog_num is not present
-             * on some discs. Therefore do this simpler lookup first. */
+            /* I've found the start_prog_num is not present on some discs.
+             * Therefore do this simpler lookup first.
+             * For e.g. I found a V1.1 "CIRRUS LOGIC" IFO with no IDs. */
             if (ps == program-1) {
                 return psi;
             }
         } else {
             uint16_t start_prog_num = ntohs(psi->id);
+            if (start_prog_num==0 || start_prog_num==0xFFFF) {
+                /* Need to maintain program count if start program of program set not stored */
+                start_prog_num = programs_total+1;
+                programs_total += ntohs(psi->nr_of_programs);
+            }
             uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
             if ((program >= start_prog_num) && (program <= end_prog_num)) {
                 return psi;

@@ -64,3 +64,10 @@ V0.6    03-06-2008
       info about programs contained in each program set.
       Skip & report unreadable blocks rather than just exiting.
       Fix crash when skipping already existing vob files.
+
+V0.6.1  20-06-2008
+
+    Kevin Veroneau <kveroneau@yourwinnipeg.net>:
+      Provided disc images and testing to better support
+      extracting labels from LG V1.1 discs which have unusual
+      identification of program titles.
