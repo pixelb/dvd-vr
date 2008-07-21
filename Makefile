@@ -1,14 +1,14 @@
 NAME := dvd-vr
-VERSION := 0.6.2
+VERSION := 0.7
 TARFILE := $(NAME)-$(VERSION).tar.gz
 HOST := $(shell uname | tr '[:lower:]' '[:upper:]')
 CC := gcc
 
 # Use `make DEBUG=1` to build debugging version
 ifeq ($(DEBUG),1)
-    CFLAGS+=-std=gnu99 -Wall -Wpadded -ggdb
+    CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -ggdb
 else
-    CFLAGS+=-std=gnu99 -Wall -Wpadded -O3 -DNDEBUG
+    CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -O3 -DNDEBUG
 endif
 
 # Use iconv when available

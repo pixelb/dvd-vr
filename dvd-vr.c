@@ -169,22 +169,73 @@ static int touch(const char* filename, struct tm* tm)
   putting more than blocks*block_size in the system cache.
   Therefore you will probably want to call this function repeatedly.
  */
-static
-int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
-    /* TODO: mmap/madvise instead of read/fadvise ? What about splice? */
+static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size)
+{
 
-    uint8_t buf[block_size];
-    int block;
-    for (block=0; block<blocks; block++) {
-        int bytes_read = read(src_fd,buf,sizeof(buf));
-        if (bytes_read != sizeof(buf)) {
+/* I tested 3 methods for streaming large amounts of data to/from disk.
+ * All 3 took the same time as the bottleneck is the reading and writing to disk.
+ * On x86 at least there is no significant difference between the AUTO and ALLOC_ALIGN
+ * methods, the latter of which allocates the userspace buffer aligned on a page.
+ * There was a noticeable reduction in CPU usage, when MMAP_WRITE was used,
+ * but the CPU usage is insignificant anyway due to the disc speeds we will
+ * generally be dealing with. I also noticed that the MMAP method was more stable
+ * giving consistent timings in all benchmark runs. However to ease portability worries
+ * I use the AUTO method below, which will also allow us to modify the MPEG frames if
+ * required in the future. For reference the timings for extracting a 338 MiB VOB
+ * from a VRO on the same hard disk were:
+ *
+ *     MMAP_WRITE
+ *       real    0m30.650s
+ *       user    0m0.007s
+ *       sys     0m1.130s
+ *     AUTO/ALLOC_ALIGN
+ *       real    0m31.776s
+ *       user    0m0.075s
+ *       sys     0m1.803s
+ */
+
+#define AUTO
+#define BLOCKS_PER_OP 1
+
+#if defined AUTO
+    uint8_t buf[block_size*BLOCKS_PER_OP];  /* Not page aligned by default */
+#elif defined ALLOC_ALIGN
+    /* There are portability issue with this.
+     * One may need to use MAP_ANONYMOUS rather than MAP_ANON.
+     * Also one may need to use MAP_FILE and operate on /dev/zero instead.
+     *
+     * Also see posix_memalign().
+     * Also see pagealign_alloc in gnulib.
+     */
+    static int8_t* buf;
+    if (!buf) {
+        buf = mmap(NULL,block_size*BLOCKS_PER_OP,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    }
+    if (buf == MAP_FAILED) {
+        fprintf(stderr, "Error: Failed allocating mmap aligned buf [%s]\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    if ((size_t)buf & (sysconf(_SC_PAGE_SIZE)-1)) {
+        fprintf(stderr, "Warning: mmap buffer not aligned\n");
+    }
+#endif
+
+
+    unsigned int block;
+    for (block=0; block<blocks; block+=BLOCKS_PER_OP) {
+        int bs=block_size*BLOCKS_PER_OP;
+        if (blocks-block < BLOCKS_PER_OP) {
+            bs = blocks-block;
+        }
+        int bytes_read = read(src_fd,buf,bs);
+        if (bytes_read != bs) {
 #ifndef NDEBUG
             if (bytes_read<0) /* otherwise file truncated */
                 fprintf(stderr,"Error reading from SRC [%s]\n", strerror(errno));
-#endif//NDEBUG
+#endif //NDEBUG
             return -1;
         }
-        if (write(dst_fd,buf,sizeof(buf)) != sizeof(buf)) {
+        if (write(dst_fd,buf,bs) != bs) {
             fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
             return -2;
         }
@@ -196,17 +247,63 @@ int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size) {
     so that we don't dump any readahead cache. */
     uint32_t bytes=blocks*block_size;
     off_t offset=lseek(src_fd,0,SEEK_CUR);
-    posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
+    int ret;
+    ret = posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
+    if (ret) {
+        fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+    }
 
     /* Don't fill cache with DST.
     Note this slows the operation down by 20% when both source
     and dest are on the same hard disk at least. I guess
     this is due to implicit syncing in posix_fadvise()? */
     posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
+    if (ret) {
+        fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+    }
 #endif //POSIX_FADV_DONTNEED
+
+   return 0;
+}
+
+#ifdef MMAP_WRITE
+static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size)
+{
+    int8_t* buf;
+    off_t offset = lseek(src_fd, 0, SEEK_CUR);
+    off_t pa_offset = offset & ~(sysconf(_SC_PAGE_SIZE) - 1); /* 4097 -> 4096 */
+    off_t offset_align = offset - pa_offset;;
+    buf = mmap(NULL, block_size*blocks+offset_align,
+               PROT_READ, MAP_PRIVATE, src_fd, pa_offset);
+    if (buf == MAP_FAILED) {
+        fprintf(stderr, "Error mmaping file [%s]\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+#ifdef MADV_SEQUENTIAL
+    if (madvise(buf, block_size*blocks+offset_align, MADV_SEQUENTIAL)) {
+        fprintf(stderr, "Warning: madvise failed [%s]\n", strerror(errno));
+    }
+#endif
+
+    if (write(dst_fd,buf+offset_align,blocks*block_size) != blocks*block_size) {
+        fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
+        return -2;
+    }
+    offset = lseek(src_fd, blocks*block_size, SEEK_CUR); /* This won't seek head I presume */
+    if (offset == (off_t)-1) {
+        fprintf(stderr,"Error seeking in src [%s]\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+#ifdef MADV_DONTNEED
+    if (madvise(buf, blocks*block_size, MADV_DONTNEED)) {
+        fprintf(stderr, "Warning: madvise failed [%s]\n", strerror(errno));
+    }
+#endif
 
     return 0;
 }
+#endif //MMAP_WRITE
 
 static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstlen)
 {
@@ -257,27 +354,30 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
 
 typedef struct {
     struct {
-        /* 0 */
-        char     id[12];
-        uint32_t vmg_ea;      /*end address*/
-        uint8_t  zero1[12];
-        uint32_t vmgi_ea;     /*includes playlist info after this structure*/
-        uint16_t version;     /*specification version*/
-        /* 34. Different from DVD-Video from here */
-        uint8_t  zero2[30];
-        uint8_t  data1[3];
-        uint8_t  txt_encoding;/*as per VideoTextDataUsage.pdf*/
-        uint8_t  data2[30];
-        uint8_t  zero3[158];
-        /* 256 */
-        uint32_t pgit_sa;    /*program info table start address*/
-        uint32_t info2_sa;   /*another start address*/
-        uint8_t  zero4[40];
-        uint32_t def_psi_sa; /*default program set info start address*/
-        uint32_t info4_sa;   /*and another*/
-        uint32_t info5_sa;   /*and another (user defined program set info?)*/
-        uint32_t info6_sa;   /*and another*/
-        uint8_t  zero5[192];
+	/* Suffix numbers are decimal offsets */
+	/* 0 */
+	char     id[12];
+	uint32_t vmg_ea;	/*end address*/
+	uint8_t  zero_16[12];
+	uint32_t vmgi_ea;	/*includes playlist info after this structure*/
+	uint16_t version;	/*specification version*/
+	/* 34 */
+	/* Different from DVD-Video from here */
+	uint8_t  zero_34[30];
+	uint8_t  data_64[3];
+	uint8_t  txt_encoding;	/*as per VideoTextDataUsage.pdf*/
+	uint8_t  data_68[30];
+	uint8_t  zero_98[158];
+	/* 256 */
+	uint32_t pgit_sa;	/*program info table start address*/
+	uint32_t info_260_sa;	/*another start address*/
+	uint8_t  zero_264[40];
+	/* 304 */
+	uint32_t def_psi_sa;	/*default program set info start address*/
+	uint32_t info_308_sa;	/*and another*/
+	uint32_t info_312_sa;	/*and another (user defined program set info?)*/
+	uint32_t info_316_sa;	/*and another*/
+	uint8_t  zero_320[192];
     } PACKED mat;
 } PACKED rtav_vmgi_t; /*Real Time AV (from DVD_RTAV dir)*/
 
@@ -350,8 +450,8 @@ typedef struct  {
     uint16_t nr_of_programs;  /* Num programs in program set */
     char     label[64];       /* ASCII. Might not be NUL terminated */
     char     title[64];       /* Could be same as label, NUL, or another charset */
-    uint16_t id_2;            /* On LG V1.1 discs this is program set number */
-    uint16_t id;              /* ID of first program in this program set */
+    uint16_t prog_set_id;     /* On LG V1.1 discs this is program set ID */
+    uint16_t first_prog_id;   /* ID of first program in this program set */
     char     data4[6];
 } PACKED psi_t;
 
@@ -512,37 +612,26 @@ static bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 
 /*
  * FIXME: This assumes the programs occur linearly within
- * the default program sets. This is accurate at least for
- * my camcorder, which creates a program set per day, and
- * auto sets the label to the date (which can be relabled).
- * This is also valid for the LG camcorder and Nero generated
- * DVD-VR images I was sent, which create a program set for
- * each program.
+ * the default program sets. This has been accurate for all
+ * discs I've seen so far at least. Note I've noticed a
+ * couple of "SONY_MOBILE" discs with no labels at all.
  */
 static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
 {
     int ps;
-    uint16_t programs_total = 0;
+    uint16_t program_count = 0;
     for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
         psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
-        if (psi_gi->nr_of_psi == ntohs(psi_gi->nr_of_programs)) {
-            /* I've found the start_prog_num is not present on some discs.
-             * Therefore do this simpler lookup first.
-             * For e.g. I found a V1.1 "CIRRUS LOGIC" IFO with no IDs. */
-            if (ps == program-1) {
-                return psi;
-            }
-        } else {
-            uint16_t start_prog_num = ntohs(psi->id);
-            if (start_prog_num==0 || start_prog_num==0xFFFF) {
-                /* Need to maintain program count if start program of program set not stored */
-                start_prog_num = programs_total+1;
-                programs_total += ntohs(psi->nr_of_programs);
-            }
-            uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
-            if ((program >= start_prog_num) && (program <= end_prog_num)) {
-                return psi;
-            }
+        uint16_t start_prog_num = ntohs(psi->first_prog_id);
+        if (start_prog_num==0 || start_prog_num==0xFFFF) {
+            /* Need to maintain program count if first_prog_id not stored,
+             * as is the case for LG and "CIRRUS LOGIC" V1.1 discs for example. */
+            start_prog_num = program_count+1;
+            program_count += ntohs(psi->nr_of_programs);
+        }
+        uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
+        if ((program >= start_prog_num) && (program <= end_prog_num)) {
+            return psi;
         }
     }
     return (psi_t*)NULL;
@@ -648,7 +737,7 @@ int main(int argc, char** argv)
     }
 
     uint32_t vmg_size = NTOHL(rtav_vmgi_ptr->mat.vmg_ea) + 1;
-    if (munmap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t)!=0)) {
+    if (munmap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t)) !=0) {
         fprintf(stderr,"Failed to unmap ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -714,7 +803,7 @@ int main(int argc, char** argv)
     struct tm now_tm;
     time_t now=time(0);
     (void) gmtime_r(&now, &now_tm);//used if no timestamp in program
-    int program;
+    unsigned int program;
     typedef uint32_t vvobi_sa_t;
     vvobi_sa_t* vvobi_sa=(vvobi_sa_t*)(pgi_gi+1);
     for (program=0; program<pgi_gi->nr_of_programs; program++) {
