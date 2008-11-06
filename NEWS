@@ -52,20 +52,20 @@ V0.5    09-04-2008
 
 V0.5.1  10-04-2008
 
-    P@draigBrady.com
+    P@draigBrady.com:
       Fix error pointed out by Kyosuke Tokoro where random
       trailing characters could be printed after each title.
 
 V0.6    03-06-2008
 
-    P@draigBrady.com
+    P@draigBrady.com:
       Support text encoding of ISO-8859-1 as well as SHIFT-JIS.
       Support finding labels on discs that don't write full
       info about programs contained in each program set.
       Skip & report unreadable blocks rather than just exiting.
       Fix crash when skipping already existing vob files.
 
-V0.7  21-07-2008
+V0.7    21-07-2008
 
     Kevin Veroneau <kveroneau@yourwinnipeg.net>:
       Provided disc images and testing to better support
@@ -74,6 +74,18 @@ V0.7  21-07-2008
     Bruce Jerrick <bmj001@ippimail.com>:
       Fix munmap() issue where memory wasn't unmapped correctly.
       Rename structure members in code to aid understanding.
-    P@draigBrady.com
+    P@draigBrady.com:
       Include a more efficient data streaming method, which
-      may be used in future.
+      may be enabled in future.
+
+V0.8    04-11-2008
+
+    Bruce Jerrick <bmj001@ippimail.com>:
+      More decoding of the global disc info structure,
+      including outputting of the textual disc info fields.
+    P@draigBrady.com:
+      Support name#001.vob filename format with "-n name" option.
+      Support writing vob data to stdout with the "-n-" option.
+      Introduce the --help and --version long options.
+      Add more error checking to command line parameters.
+      Provided a make install target and a man page.

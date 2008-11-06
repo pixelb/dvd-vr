@@ -1,14 +1,17 @@
 NAME := dvd-vr
-VERSION := 0.7
-TARFILE := $(NAME)-$(VERSION).tar.gz
-HOST := $(shell uname | tr '[:lower:]' '[:upper:]')
+VERSION := 0.8
+PREFIX := /usr/local
+DESTDIR :=
+
 CC := gcc
+
+CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -DVERSION='"$(VERSION)"'
 
 # Use `make DEBUG=1` to build debugging version
 ifeq ($(DEBUG),1)
-    CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -ggdb
+    CFLAGS+=-ggdb
 else
-    CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -O3 -DNDEBUG
+    CFLAGS+=-O3 -DNDEBUG
 endif
 
 # Use iconv when available
@@ -34,6 +37,7 @@ ifneq ($(DEBUG),1)
     LDFLAGS+=-Wl,-S
 endif
 
+HOST := $(shell uname | tr '[:lower:]' '[:upper:]')
 ifneq (,$(findstring CYGWIN,$(HOST)))
     EXEEXT := .exe
 endif
@@ -42,21 +46,48 @@ BINARY := $(NAME)$(EXEEXT)
 SOURCES := *.c
 OBJECTS := $(patsubst %.c,%.o,$(wildcard $(SOURCES)))
 
-$(BINARY): ${OBJECTS}
-	gcc ${LIBS} ${OBJECTS} ${LDFLAGS} -o $@
-
+#first target is the default
+.PHONY: all
 all: $(BINARY)
+
+$(BINARY): $(OBJECTS)
+	gcc $(LIBS) $(OBJECTS) $(LDFLAGS) -o $@
 
 #if implicit rule for .c doesn't suffice, apply here
 #%.o: %.c
 #	gcc $(CFLAGS) $< -c
 
+.PHONY: dist
 dist: clean
 	mkdir $(NAME)-$(VERSION)
-	tar --exclude $(NAME)-$(VERSION) --exclude .svn -c . | (cd $(NAME)-$(VERSION) && tar -xp)
-	tar c $(NAME)-$(VERSION) | gzip -9 > $(TARFILE)
+	tar --exclude $(NAME)-$(VERSION) --exclude .svn --exclude .git -c . | (cd $(NAME)-$(VERSION) && tar -xp)
+	tar c $(NAME)-$(VERSION) | gzip -9 > $(NAME)-$(VERSION).tar.gz
 	-@rm -Rf $(NAME)-$(VERSION)
 
+.PHONY: clean
 clean:
 	-@rm -f *.o $(BINARY) core*
-	-@rm -Rf $(TARFILE) $(NAME)-$(VERSION)
+	-@rm -Rf $(NAME)-$(VERSION)*
+
+man/$(NAME).1: $(BINARY) man/$(NAME).x
+	help2man --no-info --include=man/$(NAME).x ./$(BINARY) > man/$(NAME).1
+
+.PHONY: man
+man: man/$(NAME).1
+
+datadir := $(PREFIX)/share
+mandir := $(datadir)/man
+man1dir = $(mandir)/man1
+bindir = $(PREFIX)/bin
+
+.PHONY: install
+install: all
+	-@mkdir -p $(DESTDIR)$(bindir)
+	cp -a $(BINARY) $(DESTDIR)$(bindir)
+	-@mkdir -p $(DESTDIR)$(man1dir)
+	gzip -c man/$(NAME).1 > $(DESTDIR)$(man1dir)/$(NAME).1.gz
+
+.PHONY:	uninstall
+uninstall:
+	rm $(DESTDIR)$(bindir)/$(BINARY)
+	rm $(DESTDIR)$(man1dir)/$(NAME).1*

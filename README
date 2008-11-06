@@ -2,8 +2,10 @@ BUILD:
   make
 
 RUN:
-  ./dvd-vr
+  ./dvd-vr --help
 
 INSTALL in $PATH:
-  sudo mkdir -p /usr/local/bin
-  sudo cp dvd-vr /usr/local/bin
+  sudo make install
+
+INSTALL in package:
+  make install PREFIX=/usr DESTDIR=$RPM_BUILD_ROOT

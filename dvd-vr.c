@@ -22,12 +22,6 @@
 
 /*
 
-Usage:
-
-    To get info:   dvd-vr /media/dvd/DVD_RTAV/VR*.IFO
-    To rip:        (cd dest-dir && dvd-vr /media/dvd/DVD_RTAV/{*.IFO,*.VRO}
-
-
 Notes:
 
     Individual recordings (programs) are extracted,
@@ -75,6 +69,7 @@ Requirements:
 #include <fcntl.h>
 #include <time.h>
 #include <locale.h>
+#include <getopt.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -82,11 +77,18 @@ Requirements:
 #include <sys/time.h>
 #include <errno.h>
 
+/* For a discussion of this macro see:
+ * http://www.pixelbeat.org/programming/gcc/static_assert.html */
+#define ct_assert(e) extern char (*ct_assert(void)) [sizeof(char[1 - 2*!(e)])]
+
 #if defined(__CYGWIN__) || defined(_WIN32) /* windos doesn't like : in filenames */
 #define TIMESTAMP_FMT "%F_%H-%M-%S"
 #else
 #define TIMESTAMP_FMT "%F_%T" /* keep : in filenames for backward compat */
 #endif
+const char* base_name = TIMESTAMP_FMT;
+
+FILE* stdinfo; /* Where we write disc info */
 
 #ifdef HAVE_ICONV
 #include <langinfo.h>
@@ -129,7 +131,7 @@ void percent_display(percent_control_t percent_control, unsigned int percent, in
     switch (percent_control) {
     case PERCENT_START: {
         point=0;
-        printf("[%*s]\r",POINTS,"");
+        fprintf(stderr, "[%*s]\r",POINTS,"");
         memset(chars, ' ', POINTS);
         *(chars+POINTS)='\0';
         break;
@@ -143,16 +145,16 @@ void percent_display(percent_control_t percent_control, unsigned int percent, in
         for (i=0; i<newpoint; i++)
             if (chars[i] == ' ')
                 chars[i] = DEFAULT_PROGRESS_CHAR;
-        printf("\r[%s]",chars);
+        fprintf(stderr, "\r[%s]",chars);
         point=newpoint;
         break;
     }
     case PERCENT_END: {
-        printf("\r %*s \r",POINTS,"");
+        fprintf(stderr, "\r %*s \r",POINTS,"");
         break;
     }
     }
-    fflush(stdout);
+    fflush(stderr);
 }
 
 /* Set access and modfied times of filename
@@ -176,7 +178,7 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
  * All 3 took the same time as the bottleneck is the reading and writing to disk.
  * On x86 at least there is no significant difference between the AUTO and ALLOC_ALIGN
  * methods, the latter of which allocates the userspace buffer aligned on a page.
- * There was a noticeable reduction in CPU usage, when MMAP_WRITE was used,
+ * There was a noticeable reduction in CPU usage when MMAP_WRITE was used,
  * but the CPU usage is insignificant anyway due to the disc speeds we will
  * generally be dealing with. I also noticed that the MMAP method was more stable
  * giving consistent timings in all benchmark runs. However to ease portability worries
@@ -231,12 +233,12 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
         if (bytes_read != bs) {
 #ifndef NDEBUG
             if (bytes_read<0) /* otherwise file truncated */
-                fprintf(stderr,"Error reading from SRC [%s]\n", strerror(errno));
+                fprintf(stderr, "Error reading from SRC [%s]\n", strerror(errno));
 #endif //NDEBUG
             return -1;
         }
         if (write(dst_fd,buf,bs) != bs) {
-            fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
+            fprintf(stderr, "Error writing to DST [%s]\n", strerror(errno));
             return -2;
         }
     }
@@ -286,12 +288,12 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
 #endif
 
     if (write(dst_fd,buf+offset_align,blocks*block_size) != blocks*block_size) {
-        fprintf(stderr,"Error writing to DST [%s]\n", strerror(errno));
+        fprintf(stderr, "Error writing to DST [%s]\n", strerror(errno));
         return -2;
     }
     offset = lseek(src_fd, blocks*block_size, SEEK_CUR); /* This won't seek head I presume */
     if (offset == (off_t)-1) {
-        fprintf(stderr,"Error seeking in src [%s]\n", strerror(errno));
+        fprintf(stderr, "Error seeking in src [%s]\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -316,7 +318,7 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
                 ret=true;
             }
         } else {
-            fprintf(stderr,"Error converting from %s to %s\n",
+            fprintf(stderr, "Error converting from %s to %s\n",
                     disc_charset, nl_langinfo(CODESET));
         }
         iconv_close (cd);
@@ -354,32 +356,38 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
 
 typedef struct {
     struct {
-	/* Suffix numbers are decimal offsets */
-	/* 0 */
-	char     id[12];
-	uint32_t vmg_ea;	/*end address*/
-	uint8_t  zero_16[12];
-	uint32_t vmgi_ea;	/*includes playlist info after this structure*/
-	uint16_t version;	/*specification version*/
-	/* 34 */
-	/* Different from DVD-Video from here */
-	uint8_t  zero_34[30];
-	uint8_t  data_64[3];
-	uint8_t  txt_encoding;	/*as per VideoTextDataUsage.pdf*/
-	uint8_t  data_68[30];
-	uint8_t  zero_98[158];
-	/* 256 */
-	uint32_t pgit_sa;	/*program info table start address*/
-	uint32_t info_260_sa;	/*another start address*/
-	uint8_t  zero_264[40];
-	/* 304 */
-	uint32_t def_psi_sa;	/*default program set info start address*/
-	uint32_t info_308_sa;	/*and another*/
-	uint32_t info_312_sa;	/*and another (user defined program set info?)*/
-	uint32_t info_316_sa;	/*and another*/
-	uint8_t  zero_320[192];
+        /* Suffix numbers are decimal offsets */
+        /* 0 */
+        char     id[12];
+        uint32_t vmg_ea;         /* end address */
+        uint8_t  zero_16[12];
+        uint32_t vmgi_ea;        /* includes playlist info after this structure */
+        uint16_t version;        /* specification version */
+        /* 34 */                 /* Different from DVD-Video from here */
+        uint8_t  zero_34[30];
+        uint8_t  data_64[3];
+        uint8_t  txt_encoding;   /* as per VideoTextDataUsage.pdf */
+        uint8_t  data_68[30];
+        /* 98 */
+        char     disc_info1[64]; /* format name, or copy of disc_info2. */
+        char     disc_info2[64]; /* format name, time or user label.. */
+        uint8_t  zero_226[30];
+        /* 256 */
+        uint32_t pgit_sa;        /* program info table start address */
+        uint32_t info_260_sa;    /* ? start address */
+        uint8_t  zero_264[40];
+        /* 304 */
+        uint32_t def_psi_sa;     /* default program set info start address */
+        uint32_t info_308_sa;    /* ? start address */
+        uint32_t info_312_sa;    /* user defined program set info start address? */
+        uint32_t info_316_sa;    /* ? start address */
+        uint8_t  zero_320[32];
+        uint32_t info_352_sa;    /* ? start address */
+        uint32_t info_356_sa;    /* ? start address */
+        uint8_t  zero_360[152];
     } PACKED mat;
 } PACKED rtav_vmgi_t; /*Real Time AV (from DVD_RTAV dir)*/
+ct_assert(sizeof(rtav_vmgi_t) == 512); /* catch any miscounting above */
 
 typedef struct {
     uint8_t audio_attr[3];
@@ -476,8 +484,8 @@ static const char* parse_txt_encoding(uint8_t txt_encoding)
     }
 
     if (!strcmp("Unknown", charset)) {
-        printf("text encoding: %s", charset);
-        printf( ". (%02X). Please report this number and actual text encoding.\n", txt_encoding );
+        fprintf(stdinfo, "text encoding: %s", charset);
+        fprintf(stdinfo, ". (%02X). Please report this number and actual text encoding.\n", txt_encoding );
         charset="ISO_8859-15"; /* Shouldn't give an error at least */
     }
 
@@ -493,10 +501,10 @@ static bool parse_audio_attr(audio_attr_t audio_attr0)
     /* audio_attr0.audio_attr[2] = 9 for Masato Nunokawa's disc? */
 
     if (channels < 8) {
-        printf ("audio_channs: %d\n",channels+1);
+        fprintf(stdinfo, "audio_channs: %d\n",channels+1);
     } else if (channels == 9) {
         /* According to Masato Nunokawa's disc */
-        printf ("audio_channs: 2 (mono)\n");
+        fprintf(stdinfo, "audio_channs: 2 (mono)\n");
     } else {
         return false;
     }
@@ -508,11 +516,11 @@ static bool parse_audio_attr(audio_attr_t audio_attr0)
     case 3: coding_name="MPEG-2ext"; break;
     case 4: coding_name="Linear PCM"; break;
     }
-    printf("audio_coding: %s",coding_name);
+    fprintf(stdinfo, "audio_coding: %s",coding_name);
     if (!strcmp("Unknown", coding_name)) {
-        printf( ". (%d). Please report this number and actual audio encoding.\n", coding );
+        fprintf(stdinfo, ". (%d). Please report this number and actual audio encoding.\n", coding );
     } else {
-        putchar('\n');
+        putc('\n', stdinfo);
     }
 
     return true;
@@ -529,11 +537,11 @@ static bool parse_video_attr(uint16_t video_attr)
     int horiz_resolution = 0;
     switch (tv_sys) {
     case 0:
-        printf( "tv_system   : NTSC\n" );
+        fprintf(stdinfo, "tv_system   : NTSC\n" );
         vert_resolution=480;
         break;
     case 1:
-        printf( "tv_system   : PAL\n" );
+        fprintf(stdinfo, "tv_system   : PAL\n" );
         vert_resolution=576;
         break;
     default:
@@ -545,13 +553,13 @@ static bool parse_video_attr(uint16_t video_attr)
     case 1: horiz_resolution=704; break;
     case 2: horiz_resolution=352; break;
     case 3: horiz_resolution=352; vert_resolution/=2; break;
-    case 4: horiz_resolution=544; break; /* this is a google inspired guess */
+    case 4: horiz_resolution=544; break; /* this is a google inspired guess. */
     case 5: horiz_resolution=480; break; /* from Aaron Binns' disc */
     }
     if (horiz_resolution && vert_resolution) {
-        printf( "resolution  : %dx%d\n", horiz_resolution, vert_resolution);
+        fprintf(stdinfo, "resolution  : %dx%d\n", horiz_resolution, vert_resolution);
     } else {
-        printf( "resolution  : Unknown (%d). Please report this number and actual resolution.\n", resolution );
+        fprintf(stdinfo, "resolution  : Unknown (%d). Please report this number and actual resolution.\n", resolution );
     }
 
     const char* mode = "Unknown";
@@ -559,11 +567,11 @@ static bool parse_video_attr(uint16_t video_attr)
     case 0: mode="MPEG1"; break;
     case 1: mode="MPEG2"; break;
     }
-    printf( "video_format: %s", mode );
+    fprintf(stdinfo, "video_format: %s", mode );
     if (!strcmp("Unknown", mode)) {
-        printf( ". (%d). Please report this number and actual compression format.\n", compression );
+        fprintf(stdinfo, ". (%d). Please report this number and actual compression format.\n", compression );
     } else {
-        putchar('\n');
+        putc('\n', stdinfo);
     }
 
     const char* aspect_ratio = "Unknown";
@@ -571,11 +579,11 @@ static bool parse_video_attr(uint16_t video_attr)
     case 0: aspect_ratio="4:3"; break;
     case 1: aspect_ratio="16:9"; break; /* This is 3 for DVD-Video */
     }
-    printf( "aspect_ratio: %s", aspect_ratio );
+    fprintf(stdinfo, "aspect_ratio: %s", aspect_ratio );
     if (!strcmp("Unknown", aspect_ratio)) {
-        printf( ". (%d). Please report this number and actual aspect ratio.\n", aspect );
+        fprintf(stdinfo, ". (%d). Please report this number and actual aspect ratio.\n", aspect );
     } else {
-        putchar('\n');
+        putc('\n', stdinfo);
     }
 
     return true;
@@ -602,10 +610,10 @@ static bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
 
         char date_str[32];
         strftime(date_str,sizeof(date_str),"%F %T",tm); //locale = %x %X
-        printf("date : %s\n",date_str);
+        fprintf(stdinfo, "date : %s\n",date_str);
         ret=true;
     } else {
-        printf("date : not set\n");
+        fprintf(stdinfo, "date : not set\n");
     }
     return ret;
 }
@@ -637,27 +645,95 @@ static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
     return (psi_t*)NULL;
 }
 
-static void print_label(const psi_t* psi)
+/*
+ * This function controls the storage used by the actual
+ * encoding conversion routines. Note a len must be passed
+ * since the text fields are sometimes not NUL terminated.
+ *
+ * A string in the local encoding is returned which must be free()
+ */
+static char* text_field_convert(const char* field, unsigned int len)
 {
-    const char* label=psi->label;
-
     /* UTF-8 can have up to 6 bytes per char + space for \0 */
-    char title_local[sizeof(psi->title)*6+1];
-    const char* title = psi->title;
-    if (*title) {
-        char title_copy[sizeof(psi->title)+1]; /* Copy as may not be NUL terminated */
-        title_copy[sizeof(title_copy)-1] = '\0';
-        (void) strncpy(title_copy, title, sizeof(psi->title));
-        size_t srclen = strlen(title_copy) + 1; /* convert NUL also */
-        if (text_convert(title_copy, srclen, title_local, sizeof(title_local))) {
-            if (strncmp(title_local, label, sizeof(psi->label))) { /* if title != label */
-                printf("title: %s\n", title_local);
-            }
+    unsigned int conv_max_len=len*6+1;
+    char* field_local=malloc(conv_max_len);
+    if (!field_local) {
+        fprintf(stderr, "Error allocating space for text conversion\n");
+        return NULL;
+    }
+    if (*field) {
+        char field_copy[len+1]; /* Copy as may not be NUL terminated */
+        field_copy[len] = '\0';
+        (void) strncpy(field_copy, field, len);
+        size_t srclen = strlen(field_copy) + 1; /* convert NUL also */
+        if (!text_convert(field_copy, srclen, field_local, conv_max_len)) {
+            free(field_local);
+            field_local=NULL;
         }
+    } else {
+        *field_local='\0';
     }
 
+    return field_local;
+}
+
+/* Filter redundant info */
+static bool disc_info_redundant(const char* info)
+{
+    const char* info_exclude_list[] = {
+        "DVD VR",
+        "DVD-VR",
+        " ",
+        "" /* must be last */
+    };
+    const char** info_to_exclude = info_exclude_list;
+    while (**info_to_exclude) {
+        if (!strcmp(info, *info_to_exclude)) {
+            return true;
+        }
+        info_to_exclude++;
+    }
+    return false;
+}
+
+static void print_disc_info(rtav_vmgi_t* rtav_vmgi_ptr)
+{
+    char* txt_local;
+
+    txt_local = text_field_convert(rtav_vmgi_ptr->mat.disc_info2,
+                                   sizeof(rtav_vmgi_ptr->mat.disc_info2));
+    if (txt_local && *txt_local && !disc_info_redundant(txt_local)) {
+        fprintf(stdinfo, "info  : %s\n", txt_local);
+    }
+    free(txt_local);
+
+    if (strncmp(rtav_vmgi_ptr->mat.disc_info1,
+                rtav_vmgi_ptr->mat.disc_info2,
+                sizeof(rtav_vmgi_ptr->mat.disc_info1))) {
+        /* If there is a unique disc_info1 here, then there is
+         * no disc_info2 above on the discs I've seen so far */
+        txt_local = text_field_convert(rtav_vmgi_ptr->mat.disc_info1,
+                                    sizeof(rtav_vmgi_ptr->mat.disc_info1));
+        if (txt_local && *txt_local && !disc_info_redundant(txt_local)) {
+            fprintf(stdinfo, "info  : %s\n", txt_local);
+        }
+        free(txt_local);
+    }
+}
+
+static void print_label(const psi_t* psi)
+{
+    const char* label=psi->label; /* ASCII */
+
+    char* title_local = text_field_convert(psi->title, sizeof(psi->title));
+    if (title_local && *title_local &&
+        strncmp(title_local, label, sizeof(psi->label))) { /* if title != label */
+        fprintf(stdinfo, "title: %s\n", title_local);
+    }
+    free(title_local);
+
     if (*label && strcmp(label, " ")) {
-        printf("label: %.*s\n", (int)sizeof(psi->label), label);
+        fprintf(stdinfo, "label: %.*s\n", (int)sizeof(psi->label), label);
     }
 }
 
@@ -665,40 +741,85 @@ static void print_label(const psi_t* psi)
  *
  *********************************************************************************/
 
-unsigned required_program=0; /* process all programs by default */
+unsigned long required_program=0; /* process all programs by default */
 const char* ifo_name=NULL;
 const char* vro_name=NULL;
 
-static void usage(char** argv)
+static void usage(char** argv, int error)
 {
-    fprintf(stderr,"Usage: %s [-p #] VR_MANGR.IFO [VR_MOVIE.VRO]\n"
-                    "\n"
-                    "If -p # is specified, then only that program is processed\n"
-                    "If the VRO file is specified, the component programs are\n"
-                    "extracted to the current directory\n",argv[0]);
-    exit(EXIT_FAILURE);
+    FILE* where = error==EXIT_FAILURE ? stderr : stdout;
+
+    fprintf(where, "Usage: %s [OPTION]... VR_MANGR.IFO [VR_MOVIE.VRO]\n"
+                   "Print info about and optionally extract vob data from DVD-VR files.\n"
+                   "\n"
+                   "If the VRO file is specified, the component programs are\n"
+                   "extracted to the current directory or to stdout.\n"
+                   "\n"
+                   "  -p, --program=NUM  Only process program NUM rather than all programs.\n"
+                   "\n"
+                   "  -n, --name=NAME    Specify a basename to use for extracted vob files\n"
+                   "                     rather than using one based on the timestamp.\n"
+                   "                     If you pass `-' the vob files will be written to stdout.\n"
+                   "\n"
+                   "      --help         Display this help and exit.\n"
+                   "      --version      Output version information and exit.\n"
+                   ,argv[0]);
+    exit(error);
 }
 
 static void get_options(int argc, char** argv)
 {
+    static struct option const longopts[] =
+    {
+        /* I'm using capitals for long options
+         * without a corresponding short option. */
+        {"program", required_argument, NULL, 'p'},
+        {"name", required_argument, NULL, 'n'},
+        {"help", no_argument, NULL, 'H'},
+        {"version", no_argument, NULL, 'V'},
+        {NULL, 0, NULL, 0}
+    };
+
     int opt;
-    while ((opt = getopt(argc, argv, "p:")) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:n:", longopts, NULL)) != -1) {
         switch (opt) {
-        case 'p':
-            required_program = atoi(optarg);
+        case 'p': {
+            char* trailing;
+            required_program = strtoul(optarg, &trailing, 10);
+            if (*trailing) {
+                usage(argv, EXIT_FAILURE);
+            }
             break;
-        default: /* '?' */
-            usage(argv);
+        }
+        case 'n':
+            base_name = optarg;
+            break;
+        case 'V':
+            printf("dvd-vr "VERSION);
+            printf("\n\nWritten by Pádraig Brady <P@draigBrady.com>\n");
+            exit(EXIT_SUCCESS);
+            break;
+        case 'H':
+            usage(argv, EXIT_SUCCESS);
+            break;
+        default: /* '?',':' */
+            usage(argv, EXIT_FAILURE);
             break;
         }
     }
-    if (optind >= argc) {
-        usage(argv);
+    if (optind >= argc ||   /* no files specified */
+        argc > optind+2) {  /* too many files specified */
+        usage(argv, EXIT_FAILURE);
     }
+
     ifo_name=argv[optind++];
 
     if (optind < argc) {
         vro_name=argv[optind++];
+    }
+
+    if (base_name != TIMESTAMP_FMT && !vro_name) {
+        usage(argv, EXIT_FAILURE);
     }
 }
 
@@ -708,9 +829,15 @@ int main(int argc, char** argv)
 
     get_options(argc, argv);
 
+    if (strcmp(base_name,"-") == 0) {
+        stdinfo = stderr;
+    } else {
+        stdinfo = stdout; /* allow users to grep metadata etc. */
+    }
+
     int fd=open(ifo_name,O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr,"Error opening [%s] (%s)\n", ifo_name, strerror(errno));
+        fprintf(stderr, "Error opening [%s] (%s)\n", ifo_name, strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -718,7 +845,7 @@ int main(int argc, char** argv)
     if (vro_name) {
         vro_fd=open(vro_name,O_RDONLY);
         if (vro_fd == -1) {
-            fprintf(stderr,"Error opening [%s] (%s)\n", vro_name, strerror(errno));
+            fprintf(stderr, "Error opening [%s] (%s)\n", vro_name, strerror(errno));
             exit(EXIT_FAILURE);
         }
 #ifdef POSIX_FADV_SEQUENTIAL
@@ -728,30 +855,33 @@ int main(int argc, char** argv)
 
     rtav_vmgi_t* rtav_vmgi_ptr=mmap(0,sizeof(rtav_vmgi_t),PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
     if (rtav_vmgi_ptr == MAP_FAILED) {
-        fprintf(stderr,"Failed to MMAP ifo file (%s)\n", strerror(errno));
+        fprintf(stderr, "Failed to MMAP ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
     if (strncmp("DVD_RTR_VMG0",rtav_vmgi_ptr->mat.id,sizeof(rtav_vmgi_ptr->mat.id))) {
-        fprintf(stderr,"invalid DVD-VR IFO identifier\n");
+        fprintf(stderr, "invalid DVD-VR IFO identifier\n");
         exit(EXIT_FAILURE);
     }
 
     uint32_t vmg_size = NTOHL(rtav_vmgi_ptr->mat.vmg_ea) + 1;
     if (munmap(rtav_vmgi_ptr, sizeof(rtav_vmgi_t)) !=0) {
-        fprintf(stderr,"Failed to unmap ifo file (%s)\n", strerror(errno));
+        fprintf(stderr, "Failed to unmap ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
     rtav_vmgi_ptr=mmap(0,vmg_size,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
     if (rtav_vmgi_ptr == MAP_FAILED) {
-        fprintf(stderr,"Failed to re MMAP ifo file (%s)\n", strerror(errno));
+        fprintf(stderr, "Failed to re MMAP ifo file (%s)\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     NTOHS(rtav_vmgi_ptr->mat.version);
     rtav_vmgi_ptr->mat.version &= 0x00FF;
-    printf("format: DVD-VR V%d.%d\n",rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
+    fprintf(stdinfo, "format: DVD-VR V%d.%d\n",
+            rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
 
     disc_charset=parse_txt_encoding(rtav_vmgi_ptr->mat.txt_encoding);
+
+    print_disc_info(rtav_vmgi_ptr);
 
     NTOHL(rtav_vmgi_ptr->mat.pgit_sa);
     pgiti_t* pgiti = (pgiti_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.pgit_sa);
@@ -761,42 +891,43 @@ int main(int argc, char** argv)
     psi_gi_t *def_psi_gi = (psi_gi_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.def_psi_sa);
 
 #ifndef NDEBUG
-    printf("Number of info tables for VRO: %d\n",pgiti->nr_of_pgi);
-    printf("Number of vob formats: %d\n",pgiti->nr_of_vob_formats);
-    printf("pgit_ea: %08"PRIX32"\n",pgiti->pgit_ea);
+    fprintf(stdinfo, "Number of info tables for VRO: %d\n",pgiti->nr_of_pgi);
+    fprintf(stdinfo, "Number of vob formats: %d\n",pgiti->nr_of_vob_formats);
+    fprintf(stdinfo, "pgit_ea: %08"PRIX32"\n",pgiti->pgit_ea);
 #endif//NDEBUG
 
     if (pgiti->nr_of_pgi == 0) {
-        fprintf(stderr,"Error, couldn't find info table for VRO\n");
+        fprintf(stderr, "Error: couldn't find info table for VRO\n");
         exit(EXIT_FAILURE);
     }
     if (pgiti->nr_of_pgi > 1) {
-        fprintf(stderr,"Warning, Only processing 1 of the %"PRIu8" VRO info tables\n",pgiti->nr_of_pgi);
+        fprintf(stderr, "Warning: Only processing 1 of the %"PRIu8" VRO info tables\n",
+                pgiti->nr_of_pgi);
     }
 
     vob_format_t* vob_format = (vob_format_t*) (pgiti+1);
     int vob_type;
     int vob_types=pgiti->nr_of_vob_formats;
     for (vob_type=0; vob_type<vob_types; vob_type++) {
-        putchar('\n');
+        putc('\n', stdinfo);
         if (vob_types>1) {
-            printf("VOB format %d...\n",vob_type+1);
+            fprintf(stdinfo, "VOB format %d...\n",vob_type+1);
         }
         NTOHS(vob_format->video_attr);
         if (!parse_video_attr(vob_format->video_attr)) {
-            fprintf(stderr,"Error parsing video_attr\n");
+            fprintf(stderr, "Error parsing video_attr\n");
         }
         if (!parse_audio_attr(vob_format->audio_attr0)) {
-            fprintf(stderr,"Error parsing audio_attr0\n");
+            fprintf(stderr, "Error parsing audio_attr0\n");
         }
         vob_format++;
     }
 
     pgi_gi_t* pgi_gi = (pgi_gi_t*) vob_format;
     NTOHS(pgi_gi->nr_of_programs);
-    printf("\nNumber of programs: %d\n", pgi_gi->nr_of_programs);
+    fprintf(stdinfo, "\nNumber of programs: %d\n", pgi_gi->nr_of_programs);
     if (required_program && required_program>pgi_gi->nr_of_programs) {
-        fprintf(stderr,"Error: couldn't find specified program (%d)\n", required_program);
+        fprintf(stderr, "Error: couldn't find specified program (%lu)\n", required_program);
         exit(EXIT_FAILURE);
     }
 
@@ -815,55 +946,69 @@ int main(int argc, char** argv)
 
         NTOHL(*vvobi_sa);
 
-        putchar('\n');
+        putc('\n', stdinfo);
         psi_t* psi=find_program_text_info(def_psi_gi, program+1);
         if (psi) {
             print_label(psi);
         } else {
-            printf("label: Couldn't find. Please report.\n");
+            fprintf(stdinfo, "label: Couldn't find. Please report.\n");
         }
 
 #ifndef NDEBUG
-        printf("VVOB info (%d) address: %"PRIu32"\n",program+1,*vvobi_sa);
+        fprintf(stdinfo, "VVOB info (%d) address: %"PRIu32"\n",program+1,*vvobi_sa);
 #endif//NDEBUG
         vvob_t* vvob = (vvob_t*) (((uint8_t*)pgiti) + *vvobi_sa);
         struct tm tm;
-        char date_str[32]; //use date to give unique filename
-        if (parse_pgtm(vvob->vob_timestamp,&tm)) {
-            strftime(date_str,sizeof(date_str),TIMESTAMP_FMT,&tm);
-        } else { //use now + program num to give unique name
-            strftime(date_str,sizeof(date_str),TIMESTAMP_FMT,&now_tm);
-            int datelen=strlen(date_str);
-            (void) snprintf(date_str+datelen, sizeof(date_str)-datelen, "#%03d", program+1);
+        bool ts_ok = parse_pgtm(vvob->vob_timestamp,&tm);
+        char vob_base[32];
+        if (base_name == TIMESTAMP_FMT) { //use timestamp to give unique filename
+            if (ts_ok) {
+                strftime(vob_base,sizeof(vob_base),TIMESTAMP_FMT,&tm);
+            } else { //use now + program num to give unique name
+                strftime(vob_base,sizeof(vob_base),TIMESTAMP_FMT,&now_tm);
+                int datelen=strlen(vob_base);
+                (void) snprintf(vob_base+datelen, sizeof(vob_base)-datelen, "#%03d", program+1);
+            }
+        } else {
+            unsigned int ret = snprintf(vob_base, sizeof(vob_base), "%s#%03d", base_name, program+1);
+            if (ret >= sizeof(vob_base)) {
+                fprintf(stderr, "Error: Specified basename is too long (>%zu)\n", sizeof(vob_base)-4);
+                exit(EXIT_FAILURE);
+            }
         }
 
         int vob_fd=-1;
-        char vob_name[32];
+        char vob_name[64];
         if (vro_fd!=-1) {
-            (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",date_str); /* 1 char too long for ls -l in 80 cols :( */
-            vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
-            if (errno == EEXIST) { /* JVC DVD recorder can generate duplicate timestamps at least :( */
-              /* FIXME: The second time ripping a disc will duplicate the first VOB with duplicate timestamp.
-               * Would need to scan all program info first and change format if any duplicate timestamps. */
-              (void) snprintf(vob_name,sizeof(vob_name),"%s#%03d.vob",date_str, program+1);
-              vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+            if (strcmp(base_name, "-") == 0) {
+                vob_fd=fileno(stdout);
+            } else {
+                (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",vob_base); /* 1 char too long for ls -l in 80 cols :( */
+                vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+                if (vob_fd == -1 && errno == EEXIST && base_name == TIMESTAMP_FMT) {
+                    /* JVC DVD recorder can generate duplicate timestamps at least :( */
+                    /* FIXME: The second time ripping a disc will duplicate the first VOB with duplicate timestamp.
+                    * Would need to scan all program info first and change format if any duplicate timestamps. */
+                    (void) snprintf(vob_name,sizeof(vob_name),"%s#%03d.vob",vob_base, program+1);
+                    vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
+                }
             }
             if (vob_fd == -1) {
-                fprintf(stderr,"Error opening [%s] (%s)\n", vob_name, strerror(errno));
+                fprintf(stderr, "Error opening [%s] (%s)\n", vob_name, strerror(errno));
                 vvobi_sa++;
                 continue;
             }
         }
 
         if (vob_types>1) {
-            printf("vob format: %d\n", vvob->vob_format_id);
+            fprintf(stdinfo, "vob format: %d\n", vvob->vob_format_id);
         }
         NTOHS(vvob->vob_attr);
         int skip=0;
         if (vvob->vob_attr & 0x80) {
             skip+=sizeof(adj_vob_t);
 #ifndef NDEBUG
-            printf("skipping adjacent VOB info\n");
+            fprintf(stdinfo, "skipping adjacent VOB info\n");
 #endif//NDEBUG
         }
         skip+=sizeof(uint16_t); /* ?? */
@@ -873,14 +1018,14 @@ int main(int argc, char** argv)
         NTOHS(vobu_map->time_offset);
         NTOHL(vobu_map->vob_offset);
 #ifndef NDEBUG
-        printf("num time infos:   %"PRIu16"\n",vobu_map->nr_of_time_info);
-        printf("num VOBUs: %"PRIu16"\n",vobu_map->nr_of_vobu_info);
-        printf("time offset:      %"PRIu16"\n",vobu_map->time_offset); /* What units? */
-        printf("vob offset:     %"PRIu32"*%d\n",vobu_map->vob_offset,DVD_SECTOR_SIZE);  /* offset in the VRO file of the VOB */
+        fprintf(stdinfo, "num time infos:   %"PRIu16"\n",vobu_map->nr_of_time_info);
+        fprintf(stdinfo, "num VOBUs: %"PRIu16"\n",vobu_map->nr_of_vobu_info);
+        fprintf(stdinfo, "time offset:      %"PRIu16"\n",vobu_map->time_offset); /* What units? */
+        fprintf(stdinfo, "vob offset:     %"PRIu32"*%d\n",vobu_map->vob_offset,DVD_SECTOR_SIZE);  /* offset in the VRO file of the VOB */
 #endif//NDEBUG
         if (vro_fd!=-1) {
             if (lseek(vro_fd, vobu_map->vob_offset*DVD_SECTOR_SIZE, SEEK_SET)==(off_t)-1) {
-                fprintf(stderr,"Error seeking within VRO [%s]\n", strerror(errno));
+                fprintf(stderr, "Error seeking within VRO [%s]\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
         }
@@ -898,7 +1043,7 @@ int main(int argc, char** argv)
             if (vro_fd != -1) {
                 off_t curr_offset = lseek(vro_fd, 0, SEEK_CUR);
                 if (curr_offset == (off_t)-1) {
-                    fprintf(stderr,"Error determining VRO offset [%s]\n", strerror(errno));
+                    fprintf(stderr, "Error determining VRO offset [%s]\n", strerror(errno));
                     exit(EXIT_FAILURE);
                 }
                 int ret = stream_data(vro_fd, vob_fd, vobu_size, DVD_SECTOR_SIZE);
@@ -909,17 +1054,17 @@ int main(int argc, char** argv)
                     error=1;
                     off_t new_offset = lseek(vro_fd, 0, SEEK_CUR);
                     if (new_offset == (off_t)-1) {
-                        fprintf(stderr,"Error determining VRO offset [%s]\n", strerror(errno));
+                        fprintf(stderr, "Error determining VRO offset [%s]\n", strerror(errno));
                         exit(EXIT_FAILURE);
                     }
                     off_t skip_len = (curr_offset + vobu_size*DVD_SECTOR_SIZE) - new_offset;
                     if (skip_len) {
 #ifndef NDEBUG
-                        fprintf(stderr,"Skipping %"PRIdMAX" bytes\n", skip_len);
+                        fprintf(stderr, "Warning: Skipping %"PRIdMAX" bytes\n", skip_len);
                         /* Note we mark the whole VOBU as bad not just this skip len */
 #endif//NDEBUG
                         if (lseek(vro_fd, skip_len, SEEK_CUR) == (off_t)-1) {
-                            fprintf(stderr,"Error skipping in VRO [%s]\n", strerror(errno));
+                            fprintf(stderr, "Error skipping in VRO [%s]\n", strerror(errno));
                             exit(EXIT_FAILURE);
                         }
                     }
@@ -937,13 +1082,16 @@ int main(int argc, char** argv)
             if (!error) {
                 percent_display(PERCENT_END, 0, 0);
             } else {
-                putchar('\n');
+                /* Leave the percent display showing read errors */
+                putc('\n', stderr);
             }
-            close(vob_fd);
-            touch(vob_name, &tm);
+            if (vob_fd != fileno(stdout)) {
+                close(vob_fd);
+                touch(vob_name, &tm);
+            }
         }
 
-        printf("size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
+        fprintf(stdinfo, "size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
 
         vvobi_sa++;
     }
