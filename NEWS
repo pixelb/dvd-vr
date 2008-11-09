@@ -89,3 +89,9 @@ V0.8    04-11-2008
       Introduce the --help and --version long options.
       Add more error checking to command line parameters.
       Provided a make install target and a man page.
+
+V0.8.1  09-11-2008
+
+    P@draigBrady.com:
+      Fix a string comparison compile warning which was _not_
+      issued on linux with gcc 4.1.2 or Max OS X at least.

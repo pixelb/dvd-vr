@@ -77,6 +77,8 @@ Requirements:
 #include <sys/time.h>
 #include <errno.h>
 
+#define STREQ(x,y) (strcmp(x,y)==0)
+
 /* For a discussion of this macro see:
  * http://www.pixelbeat.org/programming/gcc/static_assert.html */
 #define ct_assert(e) extern char (*ct_assert(void)) [sizeof(char[1 - 2*!(e)])]
@@ -483,7 +485,7 @@ static const char* parse_txt_encoding(uint8_t txt_encoding)
     case 0x12: charset="SHIFT_JIS"; break;
     }
 
-    if (!strcmp("Unknown", charset)) {
+    if (STREQ("Unknown", charset)) {
         fprintf(stdinfo, "text encoding: %s", charset);
         fprintf(stdinfo, ". (%02X). Please report this number and actual text encoding.\n", txt_encoding );
         charset="ISO_8859-15"; /* Shouldn't give an error at least */
@@ -517,7 +519,7 @@ static bool parse_audio_attr(audio_attr_t audio_attr0)
     case 4: coding_name="Linear PCM"; break;
     }
     fprintf(stdinfo, "audio_coding: %s",coding_name);
-    if (!strcmp("Unknown", coding_name)) {
+    if (STREQ("Unknown", coding_name)) {
         fprintf(stdinfo, ". (%d). Please report this number and actual audio encoding.\n", coding );
     } else {
         putc('\n', stdinfo);
@@ -568,7 +570,7 @@ static bool parse_video_attr(uint16_t video_attr)
     case 1: mode="MPEG2"; break;
     }
     fprintf(stdinfo, "video_format: %s", mode );
-    if (!strcmp("Unknown", mode)) {
+    if (STREQ("Unknown", mode)) {
         fprintf(stdinfo, ". (%d). Please report this number and actual compression format.\n", compression );
     } else {
         putc('\n', stdinfo);
@@ -580,7 +582,7 @@ static bool parse_video_attr(uint16_t video_attr)
     case 1: aspect_ratio="16:9"; break; /* This is 3 for DVD-Video */
     }
     fprintf(stdinfo, "aspect_ratio: %s", aspect_ratio );
-    if (!strcmp("Unknown", aspect_ratio)) {
+    if (STREQ("Unknown", aspect_ratio)) {
         fprintf(stdinfo, ". (%d). Please report this number and actual aspect ratio.\n", aspect );
     } else {
         putc('\n', stdinfo);
@@ -688,7 +690,7 @@ static bool disc_info_redundant(const char* info)
     };
     const char** info_to_exclude = info_exclude_list;
     while (**info_to_exclude) {
-        if (!strcmp(info, *info_to_exclude)) {
+        if (STREQ(info, *info_to_exclude)) {
             return true;
         }
         info_to_exclude++;
@@ -732,7 +734,7 @@ static void print_label(const psi_t* psi)
     }
     free(title_local);
 
-    if (*label && strcmp(label, " ")) {
+    if (*label && !STREQ(label, " ")) {
         fprintf(stdinfo, "label: %.*s\n", (int)sizeof(psi->label), label);
     }
 }
@@ -818,7 +820,7 @@ static void get_options(int argc, char** argv)
         vro_name=argv[optind++];
     }
 
-    if (base_name != TIMESTAMP_FMT && !vro_name) {
+    if (!STREQ(base_name, TIMESTAMP_FMT) && !vro_name) {
         usage(argv, EXIT_FAILURE);
     }
 }
@@ -829,7 +831,7 @@ int main(int argc, char** argv)
 
     get_options(argc, argv);
 
-    if (strcmp(base_name,"-") == 0) {
+    if (STREQ(base_name, "-")) {
         stdinfo = stderr;
     } else {
         stdinfo = stdout; /* allow users to grep metadata etc. */
@@ -961,7 +963,7 @@ int main(int argc, char** argv)
         struct tm tm;
         bool ts_ok = parse_pgtm(vvob->vob_timestamp,&tm);
         char vob_base[32];
-        if (base_name == TIMESTAMP_FMT) { //use timestamp to give unique filename
+        if (STREQ(base_name, TIMESTAMP_FMT)) { //use timestamp to give unique filename
             if (ts_ok) {
                 strftime(vob_base,sizeof(vob_base),TIMESTAMP_FMT,&tm);
             } else { //use now + program num to give unique name
@@ -980,12 +982,12 @@ int main(int argc, char** argv)
         int vob_fd=-1;
         char vob_name[64];
         if (vro_fd!=-1) {
-            if (strcmp(base_name, "-") == 0) {
+            if (STREQ(base_name, "-")) {
                 vob_fd=fileno(stdout);
             } else {
                 (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",vob_base); /* 1 char too long for ls -l in 80 cols :( */
                 vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
-                if (vob_fd == -1 && errno == EEXIST && base_name == TIMESTAMP_FMT) {
+                if (vob_fd == -1 && errno == EEXIST && STREQ(base_name, TIMESTAMP_FMT)) {
                     /* JVC DVD recorder can generate duplicate timestamps at least :( */
                     /* FIXME: The second time ripping a disc will duplicate the first VOB with duplicate timestamp.
                     * Would need to scan all program info first and change format if any duplicate timestamps. */

@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.8
+VERSION := 0.8.1
 PREFIX := /usr/local
 DESTDIR :=
 
@@ -26,7 +26,7 @@ ifeq ($(HAVE_ICONV),1)
     # Add -liconv where available/required like Mac OS X & CYGWIN for example
     NEED_LICONV := $(shell echo "int main(void){}" | $(CC) -xc -liconv - -o /dev/null 2>/dev/null && echo 1 || echo 0)
     ifeq ($(NEED_LICONV),1)
-	LDFLAGS+=-liconv
+        LDFLAGS+=-liconv
     endif
 else
     $(warning "Warning: title translation support disabled as libiconv not installed")
@@ -47,15 +47,17 @@ SOURCES := *.c
 OBJECTS := $(patsubst %.c,%.o,$(wildcard $(SOURCES)))
 
 #first target is the default
-.PHONY: all
-all: $(BINARY)
-
 $(BINARY): $(OBJECTS)
-	gcc $(LIBS) $(OBJECTS) $(LDFLAGS) -o $@
+	$(CC) $(LIBS) $(OBJECTS) $(LDFLAGS) -o $@
 
-#if implicit rule for .c doesn't suffice, apply here
-#%.o: %.c
-#	gcc $(CFLAGS) $< -c
+#Enhance implicit rule for .c -> .o to depend on
+#this Makefile itself so that a recompile is done
+#if hardcoded settings like version etc. change.
+%.o: %.c Makefile
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+
+.PHONY: all
+all: $(BINARY) man
 
 .PHONY: dist
 dist: clean
@@ -77,11 +79,11 @@ man: man/$(NAME).1
 
 datadir := $(PREFIX)/share
 mandir := $(datadir)/man
-man1dir = $(mandir)/man1
-bindir = $(PREFIX)/bin
+man1dir := $(mandir)/man1
+bindir := $(PREFIX)/bin
 
 .PHONY: install
-install: all
+install: $(BINARY)
 	-@mkdir -p $(DESTDIR)$(bindir)
 	cp -a $(BINARY) $(DESTDIR)$(bindir)
 	-@mkdir -p $(DESTDIR)$(man1dir)
