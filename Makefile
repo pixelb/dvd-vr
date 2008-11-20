@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.8.1
+VERSION := 0.8.3
 PREFIX := /usr/local
 DESTDIR :=
 
@@ -15,16 +15,17 @@ else
 endif
 
 # Use iconv when available
+# This is not cached across make invocations unfortunately
 HAVE_ICONV := $(shell echo "\#include <iconv.h>" | cpp >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(HAVE_ICONV),1)
     CFLAGS+=-DHAVE_ICONV
 
     # Work around const warnings
-    ICONV_CONST := $(shell (echo "\#include <iconv.h>"; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | gcc -xc -c - -o /dev/null 2>/dev/null || echo const)
+    ICONV_CONST := $(shell (echo "\#include <iconv.h>"; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | $(CC) -xc -c - -o iconv_test.o 2>/dev/null || echo const)
     CFLAGS+=-DICONV_CONST="$(ICONV_CONST)"
 
     # Add -liconv where available/required like Mac OS X & CYGWIN for example
-    NEED_LICONV := $(shell echo "int main(void){}" | $(CC) -xc -liconv - -o /dev/null 2>/dev/null && echo 1 || echo 0)
+    NEED_LICONV := $(shell echo "int main(void){}" | $(CC) -xc -liconv - -o liconv_test 2>/dev/null && echo 1 || echo 0)
     ifeq ($(NEED_LICONV),1)
         LDFLAGS+=-liconv
     endif
@@ -68,7 +69,7 @@ dist: clean
 
 .PHONY: clean
 clean:
-	-@rm -f *.o $(BINARY) core*
+	-@rm -f *.o $(BINARY) liconv_test core*
 	-@rm -Rf $(NAME)-$(VERSION)*
 
 man/$(NAME).1: $(BINARY) man/$(NAME).x
@@ -85,7 +86,7 @@ bindir := $(PREFIX)/bin
 .PHONY: install
 install: $(BINARY)
 	-@mkdir -p $(DESTDIR)$(bindir)
-	cp -a $(BINARY) $(DESTDIR)$(bindir)
+	cp -p $(BINARY) $(DESTDIR)$(bindir)
 	-@mkdir -p $(DESTDIR)$(man1dir)
 	gzip -c man/$(NAME).1 > $(DESTDIR)$(man1dir)/$(NAME).1.gz
 

@@ -95,3 +95,9 @@ V0.8.1  09-11-2008
     P@draigBrady.com:
       Fix a string comparison compile warning which was _not_
       issued on linux with gcc 4.1.2 or Max OS X at least.
+
+V0.8.3  20-11-2008
+
+    তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>:
+      Work around older gcc toolchains overwriting /dev/null
+      Change Makefile to use `cp -p` not `cp -a` for Mac OS X.
