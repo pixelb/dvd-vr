@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.8.3
+VERSION := 0.8.4
 PREFIX := /usr/local
 DESTDIR :=
 
@@ -61,7 +61,7 @@ $(BINARY): $(OBJECTS)
 all: $(BINARY) man
 
 .PHONY: dist
-dist: clean
+dist: man clean
 	mkdir $(NAME)-$(VERSION)
 	tar --exclude $(NAME)-$(VERSION) --exclude .svn --exclude .git -c . | (cd $(NAME)-$(VERSION) && tar -xp)
 	tar c $(NAME)-$(VERSION) | gzip -9 > $(NAME)-$(VERSION).tar.gz
