@@ -1,31 +1,32 @@
 NAME := dvd-vr
-VERSION := 0.8.4
+VERSION := 0.9
 PREFIX := /usr/local
 DESTDIR :=
 
 CC := gcc
 
-CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -DVERSION='"$(VERSION)"'
+# Using override to append to user supplied CFLAGS
+override CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -DVERSION='"$(VERSION)"'
 
 # Use `make DEBUG=1` to build debugging version
 ifeq ($(DEBUG),1)
-    CFLAGS+=-ggdb
+    override CFLAGS+=-ggdb
 else
-    CFLAGS+=-O3 -DNDEBUG
+    override CFLAGS+=-O3 -DNDEBUG
 endif
 
 # Use iconv when available
 # This is not cached across make invocations unfortunately
 HAVE_ICONV := $(shell echo "\#include <iconv.h>" | cpp >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(HAVE_ICONV),1)
-    CFLAGS+=-DHAVE_ICONV
+    override CFLAGS+=-DHAVE_ICONV
 
     # Work around const warnings
-    ICONV_CONST := $(shell (echo "\#include <iconv.h>"; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | $(CC) -xc -c - -o iconv_test.o 2>/dev/null || echo const)
-    CFLAGS+=-DICONV_CONST="$(ICONV_CONST)"
+    ICONV_CONST := $(shell (echo "\#include <iconv.h>"; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | $(CC) -xc -S - -o- >/dev/null 2>&1 || echo const)
+    override CFLAGS+=-DICONV_CONST="$(ICONV_CONST)"
 
     # Add -liconv where available/required like Mac OS X & CYGWIN for example
-    NEED_LICONV := $(shell echo "int main(void){}" | $(CC) -xc -liconv - -o liconv_test 2>/dev/null && echo 1 || echo 0)
+    NEED_LICONV := $(shell echo "int main(void){}" | $(CC) -xc -liconv - -o liconv_test 2>/dev/null && echo 1 || echo 0; rm -f liconv_test)
     ifeq ($(NEED_LICONV),1)
         LDFLAGS+=-liconv
     endif
@@ -69,7 +70,7 @@ dist: man clean
 
 .PHONY: clean
 clean:
-	-@rm -f *.o $(BINARY) liconv_test core*
+	-@rm -f *.o $(BINARY) core*
 	-@rm -Rf $(NAME)-$(VERSION)*
 
 man/$(NAME).1: $(BINARY) man/$(NAME).x

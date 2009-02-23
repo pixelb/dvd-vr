@@ -3,7 +3,7 @@
  dvd-vr.c     Identify and optionally copy the individual programs
               from a DVD-VR format disc
 
- Copyright © 2007-2008 Pádraig Brady <P@draigBrady.com>
+ Copyright © 2007-2009 Pádraig Brady <P@draigBrady.com>
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -77,11 +77,26 @@ Requirements:
 #include <sys/time.h>
 #include <errno.h>
 
+#define TYPE_SIGNED(t) (! ((t) 0 < (t) -1))
+#define TYPE_MAX(t) \
+  ((t) (! TYPE_SIGNED (t) \
+        ? (t) -1 \
+        : ~ (~ (t) 0 << (sizeof (t) * CHAR_BIT - 1))))
+#define OFF_T_MAX TYPE_MAX(off_t)
+
 #define STREQ(x,y) (strcmp(x,y)==0)
+#ifndef MAX
+# define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
+#ifndef MIN
+# define MIN(a,b) (((a) < (b)) ? (a) : (b))
+#endif
 
 /* For a discussion of this macro see:
  * http://www.pixelbeat.org/programming/gcc/static_assert.html */
-#define ct_assert(e) extern char (*ct_assert(void)) [sizeof(char[1 - 2*!(e)])]
+#define ASSERT_CONCAT_(a, b) a##b
+#define ASSERT_CONCAT(a, b) ASSERT_CONCAT_(a, b)
+#define STATIC_ASSERT(e,m) enum { ASSERT_CONCAT(assert_line_, __LINE__) = 1/(!!(e)) }
 
 #if defined(__CYGWIN__) || defined(_WIN32) /* windos doesn't like : in filenames */
 #define TIMESTAMP_FMT "%F_%H-%M-%S"
@@ -168,12 +183,15 @@ static int touch(const char* filename, struct tm* tm)
     return utimes(filename, tv);
 }
 
+typedef void (*process_func_t)(uint8_t* buf, unsigned int bs, void* context);
+
 /*
   Copy data between file descriptors while not
   putting more than blocks*block_size in the system cache.
   Therefore you will probably want to call this function repeatedly.
  */
-static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size)
+static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size,
+                       process_func_t process_func, void* process_context)
 {
 
 /* I tested 3 methods for streaming large amounts of data to/from disk.
@@ -185,7 +203,7 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
  * generally be dealing with. I also noticed that the MMAP method was more stable
  * giving consistent timings in all benchmark runs. However to ease portability worries
  * I use the AUTO method below, which will also allow us to modify the MPEG frames if
- * required in the future. For reference the timings for extracting a 338 MiB VOB
+ * required. For reference the timings for extracting a 338 MiB VOB
  * from a VRO on the same hard disk were:
  *
  *     MMAP_WRITE
@@ -227,19 +245,24 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
 
     unsigned int block;
     for (block=0; block<blocks; block+=BLOCKS_PER_OP) {
-        int bs=block_size*BLOCKS_PER_OP;
-        if (blocks-block < BLOCKS_PER_OP) {
-            bs = blocks-block;
-        }
-        int bytes_read = read(src_fd,buf,bs);
-        if (bytes_read != bs) {
+        int trans_blocks = MIN(blocks-block, BLOCKS_PER_OP);
+        int trans_size = trans_blocks * block_size;
+
+        int bytes_read = read(src_fd, buf, trans_size);
+        if (bytes_read != trans_size) {
 #ifndef NDEBUG
             if (bytes_read<0) /* otherwise file truncated */
                 fprintf(stderr, "Error reading from SRC [%s]\n", strerror(errno));
 #endif //NDEBUG
             return -1;
         }
-        if (write(dst_fd,buf,bs) != bs) {
+        if (process_func) {
+            int pblock;
+            for (pblock=0; pblock<trans_blocks; pblock++) {
+                process_func(buf+(pblock*block_size), block_size, process_context);
+            }
+        }
+        if (write(dst_fd, buf, trans_size) != trans_size) {
             fprintf(stderr, "Error writing to DST [%s]\n", strerror(errno));
             return -2;
         }
@@ -249,10 +272,9 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
     /* Don't fill cache with SRC.
     Note be careful to invalidate only what we've written
     so that we don't dump any readahead cache. */
-    uint32_t bytes=blocks*block_size;
-    off_t offset=lseek(src_fd,0,SEEK_CUR);
-    int ret;
-    ret = posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
+    uint32_t bytes = blocks * block_size;
+    off_t offset = lseek(src_fd, 0, SEEK_CUR);
+    int ret = posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
     if (ret) {
         fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
     }
@@ -261,7 +283,7 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
     Note this slows the operation down by 20% when both source
     and dest are on the same hard disk at least. I guess
     this is due to implicit syncing in posix_fadvise()? */
-    posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
+    ret = posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
     if (ret) {
         fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
     }
@@ -329,9 +351,27 @@ static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstle
                 "Error converting from %s (not supported by this system)\n",
                 disc_charset);
     }
+#else
+    /* avoid warnings (__attribute__ ((unused)) is too verbose/non standard) */
+    (void)src; (void)dst; (void)srclen; (void)dstlen;
 #endif
     return ret;
 }
+/*********************************************************************************
+ *                          Internal structures
+ *********************************************************************************/
+
+typedef struct {
+    int aspect;
+    int width;
+    int height;
+} p_video_attr_t;
+p_video_attr_t* ifo_video_attrs;
+
+typedef struct {
+    int video_attr;
+} p_program_attr_t;
+p_program_attr_t* ifo_program_attrs;
 
 /*********************************************************************************
  *                          The DVD-VR structures
@@ -389,7 +429,7 @@ typedef struct {
         uint8_t  zero_360[152];
     } PACKED mat;
 } PACKED rtav_vmgi_t; /*Real Time AV (from DVD_RTAV dir)*/
-ct_assert(sizeof(rtav_vmgi_t) == 512); /* catch any miscounting above */
+STATIC_ASSERT(sizeof(rtav_vmgi_t) == 512,""); /* catch any miscounting above */
 
 typedef struct {
     uint8_t audio_attr[3];
@@ -528,26 +568,33 @@ static bool parse_audio_attr(audio_attr_t audio_attr0)
     return true;
 }
 
-static bool parse_video_attr(uint16_t video_attr)
+static bool parse_video_attr(uint16_t video_attr, p_video_attr_t* p_video_attr)
 {
     int resolution  = (video_attr & 0x0038) >>  3;
     int aspect      = (video_attr & 0x0C00) >> 10;
     int tv_sys      = (video_attr & 0x3000) >> 12;
     int compression = (video_attr & 0xC000) >> 14;
 
+    p_video_attr->aspect = p_video_attr->width = p_video_attr->height = -1;
+
     int vert_resolution  = 0;
     int horiz_resolution = 0;
+    const char* tv_system = "Unknown";
     switch (tv_sys) {
     case 0:
-        fprintf(stdinfo, "tv_system   : NTSC\n" );
+        tv_system = "NTSC";
         vert_resolution=480;
         break;
     case 1:
-        fprintf(stdinfo, "tv_system   : PAL\n" );
+        tv_system = "PAL";
         vert_resolution=576;
         break;
-    default:
-        return false;
+    }
+    fprintf(stdinfo, "tv_system   : %s", tv_system);
+    if (STREQ("Unknown", tv_system)) {
+        fprintf(stdinfo, ". (%d). Please report this number and actual TV system.\n", tv_sys );
+    } else {
+        putc('\n', stdinfo);
     }
 
     switch (resolution) {
@@ -560,8 +607,23 @@ static bool parse_video_attr(uint16_t video_attr)
     }
     if (horiz_resolution && vert_resolution) {
         fprintf(stdinfo, "resolution  : %dx%d\n", horiz_resolution, vert_resolution);
-    } else {
+        p_video_attr->width = horiz_resolution;
+        p_video_attr->height = vert_resolution;
+    } else if (!horiz_resolution) {
         fprintf(stdinfo, "resolution  : Unknown (%d). Please report this number and actual resolution.\n", resolution );
+    }
+
+    const char* aspect_ratio = "Unknown";
+    switch (aspect) {
+    case 0: aspect_ratio="4:3"; break;
+    case 1: aspect_ratio="16:9"; break;
+    }
+    fprintf(stdinfo, "aspect_ratio: %s", aspect_ratio );
+    if (STREQ("Unknown", aspect_ratio)) {
+        fprintf(stdinfo, ". (%d). Please report this number and actual aspect ratio.\n", aspect );
+    } else {
+        putc('\n', stdinfo);
+        p_video_attr->aspect = aspect + 2; /* DVD-Video aspect encoding */
     }
 
     const char* mode = "Unknown";
@@ -571,19 +633,8 @@ static bool parse_video_attr(uint16_t video_attr)
     }
     fprintf(stdinfo, "video_format: %s", mode );
     if (STREQ("Unknown", mode)) {
+        p_video_attr->aspect = -1; /* Don't adjust aspect later for unknown formats */
         fprintf(stdinfo, ". (%d). Please report this number and actual compression format.\n", compression );
-    } else {
-        putc('\n', stdinfo);
-    }
-
-    const char* aspect_ratio = "Unknown";
-    switch (aspect) {
-    case 0: aspect_ratio="4:3"; break;
-    case 1: aspect_ratio="16:9"; break; /* This is 3 for DVD-Video */
-    }
-    fprintf(stdinfo, "aspect_ratio: %s", aspect_ratio );
-    if (STREQ("Unknown", aspect_ratio)) {
-        fprintf(stdinfo, ". (%d). Please report this number and actual aspect ratio.\n", aspect );
     } else {
         putc('\n', stdinfo);
     }
@@ -737,6 +788,214 @@ static void print_label(const psi_t* psi)
     if (*label && !STREQ(label, " ")) {
         fprintf(stdinfo, "label: %.*s\n", (int)sizeof(psi->label), label);
     }
+}
+
+/*********************************************************************************
+ * MPEG2 processing routines
+ *********************************************************************************/
+
+/*
+This is to both apply the aspect ratio from the IFO to the sequence header (0xB3)
+and to reset the size of any sequence display extension packets (0xB5) to
+the size of the video, as processing of this is not handled well by players.
+
+For e.g., for 16:9 recordings my camcorder leaves the aspect in the sequence
+header at 4:3 but sets the pan scan width and height appropriately in the
+sequence display extension. ffmpeg for a short time used this to compute the
+aspect, but because many MPEG streams incorrectly set the pan scan widths and
+heights, it was changed back to ignoring these when determining the aspect ratio.
+See: http://svn.ffmpeg.org/ffmpeg?view=rev&revision=15183
+Specifically for widescreen PAL movies my DVD-VR camcorder set:
+  aspect = 2 (4:3)
+  width x height = 720 x 576
+  pan scan width x height = 540 x 576
+*/
+
+#define MPEG_HEADER_LEN 4
+#define SEQUENCE_ID 0xB3
+#define SEQUENCE_EXTENSION_ID 0xB5
+#define SEQUENCE_LEN 4 /* length of data we need to parse from sequence packet */
+#define SEQUENCE_EXTENSION_LEN 5 /* length of data we need to parse from sequence extension packet */
+
+/* Return offset to header or -1 if not found */
+static int find_mpeg2_header(const uint8_t* buf, const unsigned int bs, const uint8_t type)
+{
+    unsigned int offset=0;
+    uint32_t header = 0x00000100 + type;
+    NTOHL(header);
+    while (offset <= bs - sizeof (header)) {
+        if (*(uint32_t*)(buf+offset) == header)
+            return offset;
+        offset++;
+    }
+    return -1;
+}
+
+static int sequence_offset;
+static uint8_t sequence_aspect;
+
+/* reset cached values for each program */
+static void init_mpeg2_cache(void)
+{
+    sequence_offset = -1;
+    sequence_aspect = -1;
+}
+
+static p_video_attr_t get_sequence_aspect(const uint8_t* buf)
+{
+    p_video_attr_t s_video_attr;
+    s_video_attr.width = s_video_attr.height = -1;
+    uint8_t aspect_byte = *(buf + sequence_offset + MPEG_HEADER_LEN + 3);
+    s_video_attr.aspect = aspect_byte >> 4;
+    return s_video_attr;
+}
+
+static void set_sequence_aspect(uint8_t* buf, const unsigned int offset, p_video_attr_t s_video_attr)
+{
+    uint8_t aspect_byte = *(buf + offset + MPEG_HEADER_LEN + 3);
+    aspect_byte = (aspect_byte & 0x0F) | ((uint8_t) s_video_attr.aspect) << 4;
+    *(buf + sequence_offset + MPEG_HEADER_LEN + 3) = aspect_byte;
+}
+
+static p_video_attr_t get_sequence_display_extension_sizes(const uint8_t* buf, const unsigned int offset)
+{
+    p_video_attr_t e_video_attr;
+    e_video_attr.aspect=-1;
+
+    uint8_t type = *(buf + offset + MPEG_HEADER_LEN);
+    int skip_colour=(type&0x01) ? 3 : 0;
+    const uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + 1;
+    uint16_t horiz_disp_size  = *(display_size) << 6;
+            horiz_disp_size += *(display_size+1) >> 2;
+    uint16_t vert_disp_size = (*(display_size+1) & 0x01) << 13;
+            vert_disp_size += *(display_size+2) << 5;
+            vert_disp_size += *(display_size+3) >> 3;
+
+    e_video_attr.width = horiz_disp_size;
+    e_video_attr.height = vert_disp_size;
+
+    return e_video_attr;
+}
+
+static void set_sequence_display_extension_sizes(uint8_t* buf, const unsigned int offset, p_video_attr_t e_video_attr)
+{
+    uint16_t horiz_disp_size = e_video_attr.width;
+    uint16_t vert_disp_size = e_video_attr.height;
+
+    uint8_t type = *(buf + offset + MPEG_HEADER_LEN);
+    int skip_colour=(type&0x01) ? 3 : 0;
+    uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + 1;
+
+    /* One could precalc this per program, but frequency is low so not worth the effort */
+    *(uint32_t*)display_size = htonl(0x00020000);
+    *(display_size)   |= (horiz_disp_size >> 6);
+    *(display_size+1) |= (horiz_disp_size << 2);
+    *(display_size+1) |= ((vert_disp_size >> 13) & 0x01);
+    *(display_size+2) |= (vert_disp_size >> 5);
+    *(display_size+3) |= (vert_disp_size << 3);
+}
+
+static void fix_mpeg2_aspect(uint8_t* buf, const unsigned int bs, const unsigned int program)
+{
+    static int sector;
+    bool found_sequence_header = false;
+    const bool look_harder = false; /* Should never need to be set to true as far as I can see */
+
+    p_video_attr_t ifo_video_attr = ifo_video_attrs[ifo_program_attrs[program].video_attr];
+    if (ifo_video_attr.aspect < 2) {
+        sector++;
+        return;
+    }
+
+    p_video_attr_t s_video_attr = { .aspect=ifo_video_attr.aspect, .width=-1, .height=-1 };
+
+    if (sequence_offset == -1) {
+        if ((sequence_offset = find_mpeg2_header(buf, bs-SEQUENCE_LEN, SEQUENCE_ID)) >= 0) {
+            found_sequence_header = true;
+#ifndef NDEBUG
+            fprintf(stdinfo,"Found SH  @ %d+%d\n", sector, sequence_offset);
+#endif
+            sequence_aspect = get_sequence_aspect(buf).aspect;
+            if (sequence_aspect != ifo_video_attr.aspect) {
+                set_sequence_aspect(buf, sequence_offset, s_video_attr);
+            }
+        }
+    } else if (sequence_aspect!=ifo_video_attr.aspect) {
+        if (find_mpeg2_header(buf+sequence_offset, MPEG_HEADER_LEN, SEQUENCE_ID)==0) {
+            found_sequence_header = true;
+#ifndef NDEBUG
+            fprintf(stdinfo,"Found SH  @ %d+%d\n", sector, sequence_offset);
+#endif
+            set_sequence_aspect(buf, sequence_offset, s_video_attr);
+        } else if (look_harder) {
+        /* I can't see why the sequence headers would be at arbitrary offsets in each sector,
+         * and I've analyzed about 10 different VROs and they all have the same offsets.
+         * So I think that doing this will only redundantly scan every byte of sectors
+         * without sequence headers. */
+            int curr_offset = find_mpeg2_header(buf, bs-SEQUENCE_LEN, SEQUENCE_ID);
+            if (curr_offset >= 0) {
+                found_sequence_header = true;
+                sequence_offset = curr_offset;
+#ifndef NDEBUG
+                fprintf(stdinfo,"Found SH @ %d+%d\n", sector, sequence_offset);
+#endif
+                set_sequence_aspect(buf, sequence_offset, s_video_attr);
+            } else {
+            }
+        }
+    }
+
+    /* As an optimization, only look for sequence display extension, if there
+     * is a sequence header in this sector. */
+    if (found_sequence_header || look_harder) {
+        if (ifo_video_attr.width <= 0 || ifo_video_attr.height <= 0) {
+            sector++;
+            return;
+        }
+        int extension_offset = look_harder ? 0 : sequence_offset + MPEG_HEADER_LEN + SEQUENCE_LEN;
+        int next_offset;
+        while ((next_offset = find_mpeg2_header(buf + extension_offset,
+                                                bs - extension_offset - SEQUENCE_EXTENSION_LEN,
+                                                SEQUENCE_EXTENSION_ID)) >= 0) {
+            extension_offset += next_offset;
+            uint8_t type = *(buf + extension_offset + MPEG_HEADER_LEN);
+            if ((type&0xF0) == 0x20) {
+                p_video_attr_t e_video_attr = get_sequence_display_extension_sizes(buf, extension_offset);
+#ifndef NDEBUG
+                fprintf(stdinfo, "Found SDE @ %d+%d (%d x %d)\n", sector, extension_offset, e_video_attr.width, e_video_attr.height);
+#endif
+                e_video_attr.width = ifo_video_attr.width;
+                e_video_attr.height = ifo_video_attr.height;
+                set_sequence_display_extension_sizes(buf, extension_offset, e_video_attr);
+#ifndef NDEBUG
+                e_video_attr = get_sequence_display_extension_sizes(buf, extension_offset);
+                fprintf(stdinfo, "New   SDE @ %d+%d (%d x %d)\n", sector, extension_offset, e_video_attr.width, e_video_attr.height);
+#endif
+                break; /* Should be only 1 of these per sector */
+            } else {
+#ifndef NDEBUG
+                fprintf(stdinfo, "Found SE  @ %d+%d (type=%d)\n", sector, extension_offset, (type&0xF0)>>4);
+#endif
+            }
+            extension_offset++;
+        }
+    }
+
+    sector++;
+}
+
+/* Haven't had a request to do this yet:
+   http://forum.doom9.org/archive/index.php/t-102969.html
+   Note code there makes incorrect assumptions about offsets I think.  */
+static void add_mpeg2_nav(uint8_t* buf, const unsigned int bs)
+{
+    (void) buf; (void) bs;
+}
+
+void process_mpeg2(uint8_t* buf, const unsigned int bs, void* program)
+{
+    fix_mpeg2_aspect(buf, bs, *(const unsigned int*)program);
+    add_mpeg2_nav(buf, bs);
 }
 
 /*********************************************************************************
@@ -910,13 +1169,18 @@ int main(int argc, char** argv)
     vob_format_t* vob_format = (vob_format_t*) (pgiti+1);
     int vob_type;
     int vob_types=pgiti->nr_of_vob_formats;
+    ifo_video_attrs=malloc(vob_types * sizeof(p_video_attr_t));
+    if (!ifo_video_attrs) {
+        fprintf(stderr, "Error allocating space for video type attributes\n");
+        exit(EXIT_FAILURE);
+    }
     for (vob_type=0; vob_type<vob_types; vob_type++) {
         putc('\n', stdinfo);
         if (vob_types>1) {
             fprintf(stdinfo, "VOB format %d...\n",vob_type+1);
         }
         NTOHS(vob_format->video_attr);
-        if (!parse_video_attr(vob_format->video_attr)) {
+        if (!parse_video_attr(vob_format->video_attr, &ifo_video_attrs[vob_type])) {
             fprintf(stderr, "Error parsing video_attr\n");
         }
         if (!parse_audio_attr(vob_format->audio_attr0)) {
@@ -930,6 +1194,11 @@ int main(int argc, char** argv)
     fprintf(stdinfo, "\nNumber of programs: %d\n", pgi_gi->nr_of_programs);
     if (required_program && required_program>pgi_gi->nr_of_programs) {
         fprintf(stderr, "Error: couldn't find specified program (%lu)\n", required_program);
+        exit(EXIT_FAILURE);
+    }
+    ifo_program_attrs=malloc(pgi_gi->nr_of_programs * sizeof(p_program_attr_t));
+    if (!ifo_program_attrs) {
+        fprintf(stderr, "Error allocating space for program attributes\n");
         exit(EXIT_FAILURE);
     }
 
@@ -949,6 +1218,8 @@ int main(int argc, char** argv)
         NTOHL(*vvobi_sa);
 
         putc('\n', stdinfo);
+        fprintf(stdinfo, "num  : %d\n", program+1);
+
         psi_t* psi=find_program_text_info(def_psi_gi, program+1);
         if (psi) {
             print_label(psi);
@@ -1005,6 +1276,8 @@ int main(int argc, char** argv)
         if (vob_types>1) {
             fprintf(stdinfo, "vob format: %d\n", vvob->vob_format_id);
         }
+        ifo_program_attrs[program].video_attr = vvob->vob_format_id-1;
+
         NTOHS(vvob->vob_attr);
         int skip=0;
         if (vvob->vob_attr & 0x80) {
@@ -1025,8 +1298,15 @@ int main(int argc, char** argv)
         fprintf(stdinfo, "time offset:      %"PRIu16"\n",vobu_map->time_offset); /* What units? */
         fprintf(stdinfo, "vob offset:     %"PRIu32"*%d\n",vobu_map->vob_offset,DVD_SECTOR_SIZE);  /* offset in the VRO file of the VOB */
 #endif//NDEBUG
+        off_t vob_offset = vobu_map->vob_offset;
+        if (vob_offset > OFF_T_MAX / DVD_SECTOR_SIZE)
+        {
+            fprintf(stderr, "Overflow in extracting VOB at offset %"PRIu32"*%d\n",vobu_map->vob_offset,DVD_SECTOR_SIZE);
+            exit(EXIT_FAILURE);
+        }
+        vob_offset *= DVD_SECTOR_SIZE;
         if (vro_fd!=-1) {
-            if (lseek(vro_fd, vobu_map->vob_offset*DVD_SECTOR_SIZE, SEEK_SET)==(off_t)-1) {
+            if (lseek(vro_fd, vob_offset, SEEK_SET)==(off_t)-1) {
                 fprintf(stderr, "Error seeking within VRO [%s]\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
@@ -1038,6 +1318,7 @@ int main(int argc, char** argv)
         int error=0;
         if (vro_fd != -1) {
             percent_display(PERCENT_START, 0, 0);
+            init_mpeg2_cache();
         }
         for (vobus=0; vobus<vobu_map->nr_of_vobu_info; vobus++) {
             uint16_t vobu_size = *(uint16_t*)(&vobu_info->vobu_info[1]);
@@ -1048,7 +1329,7 @@ int main(int argc, char** argv)
                     fprintf(stderr, "Error determining VRO offset [%s]\n", strerror(errno));
                     exit(EXIT_FAILURE);
                 }
-                int ret = stream_data(vro_fd, vob_fd, vobu_size, DVD_SECTOR_SIZE);
+                int ret = stream_data(vro_fd, vob_fd, vobu_size, DVD_SECTOR_SIZE, process_mpeg2, &program);
                 if (ret == -2) { /* write error */
                     exit(EXIT_FAILURE);
                 } else if (ret == -1) { /* read error */
@@ -1098,6 +1379,8 @@ int main(int argc, char** argv)
         vvobi_sa++;
     }
 
+    free(ifo_program_attrs);
+    free(ifo_video_attrs);
     munmap(rtav_vmgi_ptr, vmg_size);
     close(fd);
     if (vro_fd != -1)
