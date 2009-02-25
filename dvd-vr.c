@@ -76,6 +76,7 @@ Requirements:
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <limits.h>
 
 #define TYPE_SIGNED(t) (! ((t) 0 < (t) -1))
 #define TYPE_MAX(t) \

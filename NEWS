@@ -115,3 +115,8 @@ V0.9    23-02-2009
       Allow specifying CFLAGS parameter to `make`.
       Modify video to apply aspect ratio from IFO index file.
       Modify video to use more standard aspect ratio encoding.
+
+V0.9.1  25-02-2009
+
+    তন্ময় ভট্টাচার্য্য <tanmoy@mindspring.com>:
+      Fix compilation on Max OS X (CHAR_BIT requires limits.h)
