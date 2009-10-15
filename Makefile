@@ -1,9 +1,7 @@
 NAME := dvd-vr
-VERSION := 0.9.1
+VERSION := 0.9.3
 PREFIX := /usr/local
 DESTDIR :=
-
-CC := gcc
 
 # Using override to append to user supplied CFLAGS
 override CFLAGS+=-std=gnu99 -Wall -Wextra -Wpadded -DVERSION='"$(VERSION)"'

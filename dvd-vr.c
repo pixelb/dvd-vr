@@ -113,6 +113,7 @@ FILE* stdinfo; /* Where we write disc info */
 #include <iconv.h>
 #endif
 const char* disc_charset;
+const char* sys_charset;
 
 /*********************************************************************************
  *                          support routines
@@ -332,32 +333,71 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
 }
 #endif //MMAP_WRITE
 
+static const char* get_charset(void)
+{
+    const char* codeset = nl_langinfo(CODESET);
+#ifdef __CYGWIN__
+    /* Cygwin 1.5 does not support locales and nl_langinfo (CODESET)
+       always returns "US-ASCII". This is fixed in v1.7 I think?  */
+    if (codeset && STREQ(codeset, "US-ASCII")) {
+
+        /* parse LANG=ja_JP.SJIS -> SJIS */
+        const char* locale = getenv ("LANG");
+        if (locale && *locale) {
+            const char *dot = strchr (locale, '.');
+
+            if (dot) {
+                const char *modifier;
+
+                dot++;
+                if (!(modifier = strchr (dot, '@'))) {
+                    return dot;
+                } else {
+                    static char buf[32];
+                    size_t len = modifier - dot;
+                    if (len < sizeof (buf)) {
+                        memcpy (buf, dot, len);
+                        *(buf+len) = '\0';
+                        return buf;
+                    }
+                }
+            }
+        }
+        return "UTF-8";
+    }
+#endif
+    return codeset;
+}
+
 static bool text_convert(const char *src, size_t srclen, char *dst, size_t dstlen)
 {
     bool ret=false;
 #ifdef HAVE_ICONV
-    iconv_t cd = iconv_open (nl_langinfo(CODESET), disc_charset);
+    iconv_t cd = iconv_open (sys_charset, disc_charset);
     if (cd != (iconv_t)-1) {
         if (iconv (cd, (ICONV_CONST char**)&src, &srclen, &dst, &dstlen) != (size_t)-1) {
             if (iconv (cd, NULL, NULL, &dst, &dstlen) != (size_t)-1) { /* terminate string */
                 ret=true;
             }
         } else {
-            fprintf(stderr, "Error converting from %s to %s\n",
-                    disc_charset, nl_langinfo(CODESET));
+            fprintf(stderr, "Error converting text from %s to %s\n",
+                    disc_charset, sys_charset);
         }
         iconv_close (cd);
     } else {
-        fprintf(stderr,
-                "Error converting from %s (not supported by this system)\n",
-                disc_charset);
+        fprintf(stderr, "Error converting text from %s to %s. Not supported\n",
+                disc_charset, sys_charset);
     }
 #else
     /* avoid warnings (__attribute__ ((unused)) is too verbose/non standard) */
     (void)src; (void)dst; (void)srclen; (void)dstlen;
+    fprintf(stderr,
+            "Error converting text. libiconv missing\n",
+            disc_charset);
 #endif
     return ret;
 }
+
 /*********************************************************************************
  *                          Internal structures
  *********************************************************************************/
@@ -418,7 +458,12 @@ typedef struct {
         /* 256 */
         uint32_t pgit_sa;        /* program info table start address */
         uint32_t info_260_sa;    /* ? start address */
-        uint8_t  zero_264[40];
+        uint8_t  zero_264[3];
+        struct {
+            uint8_t enabled;     /* Encrypted Title Key Status */
+            uint8_t title_key[8];/* This needs to be decrypted using media key */
+        } cprm;
+        uint8_t  zero_276[28];
         /* 304 */
         uint32_t def_psi_sa;     /* default program set info start address */
         uint32_t info_308_sa;    /* ? start address */
@@ -1088,6 +1133,7 @@ static void get_options(int argc, char** argv)
 int main(int argc, char** argv)
 {
     setlocale(LC_ALL,"");
+    sys_charset=get_charset();
 
     get_options(argc, argv);
 
@@ -1101,18 +1147,6 @@ int main(int argc, char** argv)
     if (fd == -1) {
         fprintf(stderr, "Error opening [%s] (%s)\n", ifo_name, strerror(errno));
         exit(EXIT_FAILURE);
-    }
-
-    int vro_fd=-1;
-    if (vro_name) {
-        vro_fd=open(vro_name,O_RDONLY);
-        if (vro_fd == -1) {
-            fprintf(stderr, "Error opening [%s] (%s)\n", vro_name, strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-#ifdef POSIX_FADV_SEQUENTIAL
-        posix_fadvise(vro_fd, 0, 0, POSIX_FADV_SEQUENTIAL);/* More readahead done */
-#endif //POSIX_FADV_SEQUENTIAL
     }
 
     rtav_vmgi_t* rtav_vmgi_ptr=mmap(0,sizeof(rtav_vmgi_t),PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
@@ -1136,10 +1170,25 @@ int main(int argc, char** argv)
         exit(EXIT_FAILURE);
     }
 
+    int vro_fd=-1;
+    if (vro_name && !rtav_vmgi_ptr->mat.cprm.enabled) {
+        vro_fd=open(vro_name,O_RDONLY);
+        if (vro_fd == -1) {
+            fprintf(stderr, "Error opening [%s] (%s)\n", vro_name, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+#ifdef POSIX_FADV_SEQUENTIAL
+        posix_fadvise(vro_fd, 0, 0, POSIX_FADV_SEQUENTIAL);/* More readahead done */
+#endif //POSIX_FADV_SEQUENTIAL
+    }
+
     NTOHS(rtav_vmgi_ptr->mat.version);
     rtav_vmgi_ptr->mat.version &= 0x00FF;
     fprintf(stdinfo, "format: DVD-VR V%d.%d\n",
             rtav_vmgi_ptr->mat.version>>4,rtav_vmgi_ptr->mat.version&0x0F);
+    if (rtav_vmgi_ptr->mat.cprm.enabled) {
+        fprintf(stdinfo, "Encryption: CPRM\n");
+    }
 
     disc_charset=parse_txt_encoding(rtav_vmgi_ptr->mat.txt_encoding);
 
@@ -1378,6 +1427,10 @@ int main(int argc, char** argv)
         fprintf(stdinfo, "size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
 
         vvobi_sa++;
+    }
+
+    if (vro_name && rtav_vmgi_ptr->mat.cprm.enabled) {
+        fprintf(stderr, "\nError: This disc employs CPRM encryption which is currently unsupported.\n");
     }
 
     free(ifo_program_attrs);
