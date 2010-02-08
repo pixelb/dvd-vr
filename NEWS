@@ -131,17 +131,10 @@ V0.9.3  15-10-2009
        Report and sample disc from Stephen Stewart <funaki2008@googlemail.com>
       Don't override CC environment variable so that ccache, clang, etc. work
 
-V0.9.4  15-02-2010
+V0.9.4  24-11-2009
 
     Helen Buss <mythtv@hbuus.com>:
-      Fix compilation on cyqwin without libiconv (always include langinfo.h).
-      Report and provided sample disc image for CPRM misdetection.
-    Alexander Skwar <alexander@skwar.name>:
-      Add support for building Mac OS X universal binaries.
+      Fix compilation on cyqwin without libiconv (always include langinfo.h)
+      Bug report and sample disc image for CPRM misdetection.
     P@draigBrady.com:
       Fix CPRM detection, which must be done per program rather than per disc.
-      Fix label (program set) identification on discs that indicate
-       programs other than the first in the set as the first program to play.
-       Report and sample disc from Markus Laker <markus@mnslaker.f9.co.uk>.
-      Added a "[label]" parameter to the --name option,
-       to generate (sanitized) file names based on the title, or label.
