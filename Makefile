@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.9.3
+VERSION := 0.9.4
 PREFIX := /usr/local
 DESTDIR :=
 
@@ -11,6 +11,18 @@ ifeq ($(DEBUG),1)
     override CFLAGS+=-ggdb
 else
     override CFLAGS+=-O3 -DNDEBUG
+endif
+
+# Use `make UNIVERSAL=1` to build a Mac OS X universal binary
+HAVE_MACOSX := $(shell gcc -xc -mmacosx-version-min -c - < /dev/null 2>/dev/null && echo 1 || echo 0)
+ifeq ($(UNIVERSAL),1)
+ifeq ($(HAVE_MACOSX),1)
+    UNIVERSAL_BINARY := -mmacosx-version-min=10.4 -force_cpusubtype_ALL -arch x86_64 -arch i386 -arch ppc
+    override CFLAGS+=$(UNIVERSAL_BINARY)
+    override LDFLAGS+=$(UNIVERSAL_BINARY)
+else
+    $(warning "Warning: Universal binaries are only supported on Mac OS X")
+endif
 endif
 
 # Use iconv when available
