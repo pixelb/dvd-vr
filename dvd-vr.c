@@ -3,7 +3,7 @@
  dvd-vr.c     Identify and optionally copy the individual programs
               from a DVD-VR format disc
 
- Copyright © 2007-2009 Pádraig Brady <P@draigBrady.com>
+ Copyright © 2007-2010 Pádraig Brady <P@draigBrady.com>
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -29,7 +29,8 @@ Notes:
     Merged programs are not handled yet though as
     I would need to fully parse the higher level program set info.
     Note the VOBs output from this program can be trivially
-    concatenated with the unix cat command for example.
+    concatenated with the unix cat command for example
+    (note there will be timestamp jumps which may be problematic).
 
     While extracting the DVD data, this program instructs the system
     to not cache the data so that existing cached data is not affected.
@@ -56,7 +57,7 @@ Requirements:
     Tested on linux, CYGWIN and Mac OS X
 */
 
-#define _GNU_SOURCE           /* for posix_fadvise() and futimes() */
+#define _GNU_SOURCE           /* for posix_fadvise(), futimes() */
 #define _FILE_OFFSET_BITS 64  /* for implicit large file support */
 
 #include <inttypes.h>
@@ -65,6 +66,7 @@ Requirements:
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -77,6 +79,14 @@ Requirements:
 #include <sys/time.h>
 #include <errno.h>
 #include <limits.h>
+
+#if !defined(MB_LEN_MAX) || MB_LEN_MAX<16
+/* 1 char could be converted to 2 multibyte chars
+ * (for example combining accents), witheach taking up to
+ * 6 bytes in UTF-8 for example */
+# undef MB_LEN_MAX
+# define MB_LEN_MAX 16
+#endif
 
 #define TYPE_SIGNED(t) (! ((t) 0 < (t) -1))
 #define TYPE_MAX(t) \
@@ -119,6 +129,18 @@ const char* sys_charset;
  *                          support routines
  *********************************************************************************/
 
+/* Mac OS X doesn't provide strndup :( */
+static char* my_strndup(const char *s, size_t n)
+{
+    size_t len = MIN(strlen(s), n);
+    char* ret = malloc(len+1);
+    if (ret) {
+        memcpy(ret, s, len);
+        ret[len] = '\0';
+    }
+    return ret;
+}
+
 #ifndef NDEBUG
 void hexdump(const void* data, int len)
 {
@@ -130,6 +152,7 @@ void hexdump(const void* data, int len)
     }
     if (len%16) putchar('\n');
 }
+
 #endif//NDEBUG
 
 typedef enum {
@@ -547,7 +570,7 @@ typedef struct  {
     char     title[64];       /* Could be same as label, NUL, or another charset */
     uint16_t prog_set_id;     /* On LG V1.1 discs this is program set ID */
     uint16_t first_prog_id;   /* ID of first program in this program set */
-    char     data4[6];
+    char     data3[6];
 } PACKED psi_t;
 
 static const char* parse_txt_encoding(uint8_t txt_encoding)
@@ -716,6 +739,34 @@ static bool parse_pgtm(pgtm_t pgtm, struct tm* tm)
     return ret;
 }
 
+#ifndef NDEBUG
+/* This is basically a simplification of find_program_text_info() */
+static void print_psi(psi_gi_t* psi_gi)
+{
+    putc('\n', stdinfo);
+    int ps;
+    uint16_t program_count = 0;
+    for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
+        psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
+
+        uint16_t first_prog_num = ntohs(psi->first_prog_id); /* assuming this is first to play? */
+        uint16_t start_prog_num = program_count+1;
+        uint16_t num_progs_in_set = ntohs(psi->nr_of_programs);
+        program_count += num_progs_in_set;
+        fprintf(stdinfo, "Programs in Program set %d:", ps+1);
+        int program_id;
+        for (program_id = start_prog_num;
+             program_id < start_prog_num+num_progs_in_set;
+             program_id++) {
+            const char* fmt = (program_id==first_prog_num ? " (%d)" : " %d");
+            fprintf(stdinfo, fmt, program_id);
+        }
+        putc('\n', stdinfo);
+    }
+    putc('\n', stdinfo);
+}
+#endif//NDEBUG
+
 /*
  * FIXME: This assumes the programs occur linearly within
  * the default program sets. This has been accurate for all
@@ -726,23 +777,26 @@ static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
 {
     int ps;
     uint16_t program_count = 0;
-    uint16_t last_end_prog_num = 0;
     for (ps=0; ps<psi_gi->nr_of_psi; ps++) {
         psi_t *psi = (psi_t*)(((char*)(psi_gi+1)) + (ps * sizeof(psi_t)));
-        uint16_t start_prog_num = ntohs(psi->first_prog_id);
-        //start_prog_num = 0;
-        if (start_prog_num != last_end_prog_num+1) { /* TODO: see is nr_of_psi always = num programs?  as I've forced =0 line above with no test failures? */
-            start_prog_num=0;
-            program_count=last_end_prog_num;
-        }
-        if (start_prog_num==0 || start_prog_num==0xFFFF) {
-            /* Need to maintain program count if first_prog_id not stored,
-             * as is the case for LG and "CIRRUS LOGIC" V1.1 discs for example. */
-            start_prog_num = program_count+1;
-            program_count += ntohs(psi->nr_of_programs);
-        }
-        uint16_t end_prog_num = start_prog_num + ntohs(psi->nr_of_programs) - 1;
-        last_end_prog_num = end_prog_num;
+        uint16_t start_prog_num;
+        /*
+        start_prog_num = ntohs(psi->first_prog_id);
+
+        We need to maintain program count as first_prog_id is often not stored,
+        as is the case for LG and "CIRRUS LOGIC" V1.1 discs for example (it's 0 or 0xFFFF).
+        Also I noticed a Sony disc that had programs sets with 2 programs in them, which
+        sometimes set the first_prog_id to the second program in the set.  Perhaps
+        this field identifies the prog to start playing, as the first program in those
+        sets was a single VOBU that was generated due to a split.
+        Perhaps I should name the programs label.ps_id(001) when > 1 ps. */
+        start_prog_num = program_count+1;
+        uint16_t num_progs_in_set = ntohs(psi->nr_of_programs);
+        /* TODO: Perhaps have an option to merge all programs
+           in a program set to a vob using this info. That would assume
+           though that the programs were adjacent. */
+        program_count += num_progs_in_set;
+        uint16_t end_prog_num = start_prog_num + num_progs_in_set - 1;
         if ((program >= start_prog_num) && (program <= end_prog_num)) {
             return psi;
         }
@@ -759,8 +813,7 @@ static psi_t* find_program_text_info(psi_gi_t* psi_gi, int program)
  */
 static char* text_field_convert(const char* field, unsigned int len)
 {
-    /* UTF-8 can have up to 6 bytes per char + space for \0 */
-    unsigned int conv_max_len=len*6+1;
+    unsigned int conv_max_len=len*MB_LEN_MAX+1/*NUL*/;
     char* field_local=malloc(conv_max_len);
     if (!field_local) {
         fprintf(stderr, "Error allocating space for text conversion\n");
@@ -824,6 +877,89 @@ static void print_disc_info(rtav_vmgi_t* rtav_vmgi_ptr)
         }
         free(txt_local);
     }
+}
+
+static char* mb_clean_name(const char* src)
+{
+    size_t src_size = strlen (src) + 1;
+    wchar_t *str_wc = NULL;
+    size_t src_chars = mbstowcs (NULL, src, 0);
+    if (src_chars == (size_t) -1)
+        return NULL;
+    src_chars += 1; /* make space for NUL */
+    str_wc = malloc (src_chars * sizeof (wchar_t));
+    if (str_wc == NULL)
+        return NULL;
+    if (mbstowcs (str_wc, src, src_chars) <= 0) {
+        free(str_wc);
+        return NULL;
+    }
+    str_wc[src_chars - 1] = L'\0';
+
+    wchar_t* wc = str_wc;
+    while (*wc) {
+        size_t good = wcscspn(wc, L" /:?\\");
+        if (good)
+            wc+=good;
+        else
+            *wc++=L'-';
+    }
+
+    char* newstr = malloc (src_size);
+    if (newstr == NULL) {
+        free(str_wc);
+        return NULL;
+    }
+    (void) wcstombs(newstr, str_wc, src_size);
+    free(str_wc);
+
+    return newstr;
+}
+
+/* Must pass a string on the heap which may be modified inplace,
+ * or may be reallocated. */
+static char* clean_name(char* src, bool mb_src)
+{
+    if (mb_src && (MB_CUR_MAX > 1)) {
+        char* cleaned = mb_clean_name(src);
+        free(src);
+        return cleaned;
+    }
+
+    char* c = src;
+    while (*c) {
+        size_t good = strcspn(c, " /:?\\");
+        if (good)
+            c+=good;
+        else
+            *c++='-';
+    }
+    return src;
+}
+
+static char* get_label_base(const psi_t* psi)
+{
+    char* title_local = text_field_convert(psi->title, sizeof(psi->title));
+    if (title_local && *title_local &&
+        strncmp(title_local, psi->label, sizeof(psi->label))) { /* if title != label */
+        title_local = clean_name(title_local, true);
+        if (!title_local) {
+          fprintf(stderr, "Error generating file name from title\n");
+          return NULL;
+        } else {
+          return title_local;
+        }
+    }
+    free(title_local);
+
+    const char* label=psi->label; /* ASCII */
+    if (*label && !STREQ(label, " ")) {
+        char* label_local = my_strndup(label, sizeof(psi->label));
+        label_local = clean_name(label_local, false);
+        return label_local;
+    }
+
+    return NULL;
 }
 
 static void print_label(const psi_t* psi)
@@ -1097,6 +1233,8 @@ static void usage(char** argv, int error)
                    "  -n, --name=NAME    Specify a basename to use for extracted vob files\n"
                    "                     rather than using one based on the timestamp.\n"
                    "                     If you pass `-' the vob files will be written to stdout.\n"
+                   "                     If you pass `[label]' the names will be based on\n"
+                   "                     a sanitized version of the title or label.\n"
                    "\n"
                    "      --help         Display this help and exit.\n"
                    "      --version      Output version information and exit.\n"
@@ -1234,6 +1372,10 @@ int main(int argc, char** argv)
     psi_gi_t *def_psi_gi = (psi_gi_t*) ((char*)rtav_vmgi_ptr + rtav_vmgi_ptr->mat.def_psi_sa);
 
 #ifndef NDEBUG
+    NTOHS(def_psi_gi->nr_of_programs);
+    if ((def_psi_gi->nr_of_psi > 1) && (def_psi_gi->nr_of_psi != def_psi_gi->nr_of_programs)) {
+        print_psi(def_psi_gi);
+    }
     fprintf(stdinfo, "Number of info tables for VRO: %d\n",pgiti->nr_of_pgi);
     fprintf(stdinfo, "Number of vob formats: %d\n",pgiti->nr_of_vob_formats);
     fprintf(stdinfo, "pgit_ea: %08"PRIX32"\n",pgiti->pgit_ea);
@@ -1315,7 +1457,7 @@ int main(int argc, char** argv)
         vvob_t* vvob = (vvob_t*) (((uint8_t*)pgiti) + *vvobi_sa);
         struct tm tm;
         bool ts_ok = parse_pgtm(vvob->vob_timestamp,&tm);
-        char vob_base[32];
+        char vob_base[(sizeof(psi->title)*MB_LEN_MAX)+4/*#123*/+1/*NUL*/];
         if (STREQ(base_name, TIMESTAMP_FMT)) { //use timestamp to give unique filename
             if (ts_ok) {
                 strftime(vob_base,sizeof(vob_base),TIMESTAMP_FMT,&tm);
@@ -1324,6 +1466,22 @@ int main(int argc, char** argv)
                 int datelen=strlen(vob_base);
                 (void) snprintf(vob_base+datelen, sizeof(vob_base)-datelen, "#%03d", program+1);
             }
+        } else if (STREQ(base_name, "[label]")) { //use the label to generate filename
+            if (!psi) {
+                fprintf(stderr, "Error: Couldn't generate name based on label\n");
+                exit(EXIT_FAILURE);
+            }
+            char* label_base = get_label_base(psi);
+            if (!label_base) {
+                fprintf(stderr, "Error: Couldn't generate name based on empty label\n");
+                exit(EXIT_FAILURE);
+            }
+            unsigned int ret = snprintf(vob_base, sizeof(vob_base), "%s#%03d", label_base, program+1);
+            if (ret >= sizeof(vob_base)) { /* Shouldn't happen.  */
+                fprintf(stderr, "Error: label is too long\n");
+                exit(EXIT_FAILURE);
+            }
+            free(label_base);
         } else {
             unsigned int ret = snprintf(vob_base, sizeof(vob_base), "%s#%03d", base_name, program+1);
             if (ret >= sizeof(vob_base)) {
@@ -1333,12 +1491,12 @@ int main(int argc, char** argv)
         }
 
         int vob_fd=-1;
-        char vob_name[64];
+        char vob_name[sizeof(vob_base)+4];
         if (vro_fd!=-1) {
             if (STREQ(base_name, "-")) {
                 vob_fd=fileno(stdout);
             } else {
-                (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",vob_base); /* 1 char too long for ls -l in 80 cols :( */
+                (void) snprintf(vob_name,sizeof(vob_name),"%s.vob",vob_base);
                 vob_fd=open(vob_name,O_WRONLY|O_CREAT|O_EXCL,0666);
                 if (vob_fd == -1 && errno == EEXIST && STREQ(base_name, TIMESTAMP_FMT)) {
                     /* JVC DVD recorder can generate duplicate timestamps at least :( */
