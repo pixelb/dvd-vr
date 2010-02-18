@@ -1,5 +1,5 @@
 NAME := dvd-vr
-VERSION := 0.9.5
+VERSION := 0.9.6
 PREFIX := /usr/local
 DESTDIR :=
 

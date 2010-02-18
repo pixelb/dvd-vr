@@ -146,7 +146,9 @@ V0.9.4  15-02-2010
       Added a "[label]" parameter to the --name option,
        to generate (sanitized) file names based on the title, or label.
 
-V0.9.5  18-02-2010
+V0.9.6  18-02-2010
 
     P@draigBrady.com:
-      Fix compilation on Mac OS X.
+      Fix compilation on Mac OS X. Reported by Eyal.
+      Suppress posix_fadvise warnings when writing to stdout.
+        Reported by Kyosuke Tokoro.

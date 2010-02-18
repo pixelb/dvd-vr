@@ -214,33 +214,32 @@ typedef void (*process_func_t)(uint8_t* buf, unsigned int bs, void* context);
   Copy data between file descriptors while not
   putting more than blocks*block_size in the system cache.
   Therefore you will probably want to call this function repeatedly.
+
+  I tested 3 methods for streaming large amounts of data to/from disk.
+  All 3 took the same time as the bottleneck is the reading and writing to disk.
+  On x86 at least there is no significant difference between the AUTO and ALLOC_ALIGN
+  methods, the latter of which allocates the userspace buffer aligned on a page.
+  There was a noticeable reduction in CPU usage when MMAP_WRITE was used,
+  but the CPU usage is insignificant anyway due to the disc speeds we will
+  generally be dealing with. I also noticed that the MMAP method was more stable
+  giving consistent timings in all benchmark runs. However to ease portability worries
+  I use the AUTO method below, which will also allow us to modify the MPEG frames if
+  required. For reference the timings for extracting a 338 MiB VOB
+  from a VRO on the same hard disk were:
+
+      MMAP_WRITE
+        real    0m30.650s
+        user    0m0.007s
+        sys     0m1.130s
+      AUTO/ALLOC_ALIGN
+        real    0m31.776s
+        user    0m0.075s
+        sys     0m1.803s
  */
+
 static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_size,
                        process_func_t process_func, void* process_context)
 {
-
-/* I tested 3 methods for streaming large amounts of data to/from disk.
- * All 3 took the same time as the bottleneck is the reading and writing to disk.
- * On x86 at least there is no significant difference between the AUTO and ALLOC_ALIGN
- * methods, the latter of which allocates the userspace buffer aligned on a page.
- * There was a noticeable reduction in CPU usage when MMAP_WRITE was used,
- * but the CPU usage is insignificant anyway due to the disc speeds we will
- * generally be dealing with. I also noticed that the MMAP method was more stable
- * giving consistent timings in all benchmark runs. However to ease portability worries
- * I use the AUTO method below, which will also allow us to modify the MPEG frames if
- * required. For reference the timings for extracting a 338 MiB VOB
- * from a VRO on the same hard disk were:
- *
- *     MMAP_WRITE
- *       real    0m30.650s
- *       user    0m0.007s
- *       sys     0m1.130s
- *     AUTO/ALLOC_ALIGN
- *       real    0m31.776s
- *       user    0m0.075s
- *       sys     0m1.803s
- */
-
 #define AUTO
 #define BLOCKS_PER_OP 1
 
@@ -299,18 +298,25 @@ static int stream_data(int src_fd, int dst_fd, uint32_t blocks, uint16_t block_s
     so that we don't dump any readahead cache. */
     uint32_t bytes = blocks * block_size;
     off_t offset = lseek(src_fd, 0, SEEK_CUR);
-    int ret = posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
-    if (ret) {
-        fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+    /* Note src is already guaranteed seekable, but offset may
+     * be 0 for example if /dev/zero is specified for testing. */
+    if (offset >= bytes) {
+        int ret = posix_fadvise(src_fd, offset-bytes, bytes, POSIX_FADV_DONTNEED);
+        if (ret) {
+            fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+        }
     }
 
     /* Don't fill cache with DST.
     Note this slows the operation down by 20% when both source
     and dest are on the same hard disk at least. I guess
     this is due to implicit syncing in posix_fadvise()? */
-    ret = posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
-    if (ret) {
-        fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+    offset = lseek(dst_fd, 0, SEEK_CUR);
+    if (offset != (off_t)-1) { /* seekable */
+        int ret = posix_fadvise(dst_fd, 0, 0, POSIX_FADV_DONTNEED);
+        if (ret) {
+            fprintf(stderr, "Warning: posix_fadvise failed [%s]\n", strerror(ret));
+        }
     }
 #endif //POSIX_FADV_DONTNEED
 
