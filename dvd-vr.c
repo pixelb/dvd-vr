@@ -82,7 +82,7 @@ Requirements:
 
 #if !defined(MB_LEN_MAX) || MB_LEN_MAX<16
 /* 1 char could be converted to 2 multibyte chars
- * (for example combining accents), witheach taking up to
+ * (for example combining accents), with each taking up to
  * 6 bytes in UTF-8 for example */
 # undef MB_LEN_MAX
 # define MB_LEN_MAX 16
@@ -128,11 +128,17 @@ const char* sys_charset;
 /*********************************************************************************
  *                          support routines
  *********************************************************************************/
+static size_t my_strnlen(const char* s, size_t n)
+{
+    size_t len = 0;
+    while (n-- && *s++) len++;
+    return len;
+}
 
 /* Mac OS X doesn't provide strndup :( */
 static char* my_strndup(const char *s, size_t n)
 {
-    size_t len = MIN(strlen(s), n);
+    size_t len = my_strnlen(s, n);
     char* ret = malloc(len+1);
     if (ret) {
         memcpy(ret, s, len);
@@ -436,9 +442,16 @@ typedef struct {
 } p_video_attr_t;
 p_video_attr_t* ifo_video_attrs;
 
+typedef enum {
+    SCRAMBLED_UNSET=-1,
+    UNSCRAMBLED=0,
+    SCRAMBLED=1,
+    PARTIALLY_SCRAMBLED=2
+} scrambled_t;
+
 typedef struct {
     int video_attr;
-    int scrambled;
+    scrambled_t scrambled;
 } p_program_attr_t;
 p_program_attr_t* ifo_program_attrs;
 
@@ -498,7 +511,7 @@ typedef struct {
         uint32_t info_312_sa;    /* user defined program set info start address? */
         uint32_t info_316_sa;    /* ? start address */
         uint8_t  zero_320[32];
-        uint32_t info_352_sa;    /* ? start address */
+        uint32_t txt_attr_sa;    /* extra attributes for programs (chan id etc.) */
         uint32_t info_356_sa;    /* ? start address */
         uint8_t  zero_360[152];
     } PACKED mat;
@@ -1060,7 +1073,7 @@ static p_video_attr_t get_sequence_display_extension_sizes(const uint8_t* buf, c
 
     uint8_t type = *(buf + offset + MPEG_HEADER_LEN);
     int skip_colour=(type&0x01) ? 3 : 0;
-    const uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + 1;
+    const uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + sizeof (type);
     uint16_t horiz_disp_size  = *(display_size) << 6;
             horiz_disp_size += *(display_size+1) >> 2;
     uint16_t vert_disp_size = (*(display_size+1) & 0x01) << 13;
@@ -1080,7 +1093,7 @@ static void set_sequence_display_extension_sizes(uint8_t* buf, const unsigned in
 
     uint8_t type = *(buf + offset + MPEG_HEADER_LEN);
     int skip_colour=(type&0x01) ? 3 : 0;
-    uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + 1;
+    uint8_t* display_size = buf + offset + MPEG_HEADER_LEN + skip_colour + sizeof (type);
 
     /* One could precalc this per program, but frequency is low so not worth the effort */
     *(uint32_t*)display_size = htonl(0x00020000);
@@ -1093,10 +1106,10 @@ static void set_sequence_display_extension_sizes(uint8_t* buf, const unsigned in
 
 static void check_mpeg_encryption(uint8_t* buf, const unsigned int bs, const unsigned int program)
 {
-    if (ifo_program_attrs[program].scrambled == -1) {
-        /* Note we'll warn below if we've not seen any video stream (E0 doesn't match).
-         * Note also I've only seen AC-3 audio on 0xBD and it has also been
-         * encrypted on discs I've seen.  */
+    /* Note we'll warn below if we've not seen any video stream (E0 doesn't match).
+     * Note also I've only seen AC-3 audio on 0xBD and it has also been
+     * encrypted on discs I've seen.  */
+    if (ifo_program_attrs[program].scrambled != PARTIALLY_SCRAMBLED) {
         int pes_offset = find_mpeg_header(buf, bs-VIDEO_STREAM_LEN, VIDEO_STREAM_0);
         if (pes_offset >= 0) {
             /* extension header is always available for 0xBD and 0xE? types */
@@ -1107,7 +1120,12 @@ static void check_mpeg_encryption(uint8_t* buf, const unsigned int bs, const uns
             } else {
                 scrambled = false; /* assuming MPEG1 doesn't support encryption */
             }
-            ifo_program_attrs[program].scrambled = scrambled;
+            if (ifo_program_attrs[program].scrambled != SCRAMBLED_UNSET &&
+                ifo_program_attrs[program].scrambled != scrambled) {
+                ifo_program_attrs[program].scrambled = PARTIALLY_SCRAMBLED;
+            } else {
+                ifo_program_attrs[program].scrambled = scrambled;
+            }
         }
     }
 }
@@ -1137,13 +1155,14 @@ static void fix_mpeg2_aspect(uint8_t* buf, const unsigned int bs, const unsigned
                 set_sequence_aspect(buf, sequence_offset, s_video_attr);
             }
         }
-    } else if (sequence_aspect!=ifo_video_attr.aspect) {
+    } else {
         if (find_mpeg_header(buf+sequence_offset, MPEG_HEADER_LEN, SEQUENCE_ID)==0) {
             found_sequence_header = true;
 #ifndef NDEBUG
             fprintf(stdinfo,"Found SH  @ %d+%d\n", sector, sequence_offset);
 #endif
-            set_sequence_aspect(buf, sequence_offset, s_video_attr);
+            if (sequence_aspect!=ifo_video_attr.aspect)
+                set_sequence_aspect(buf, sequence_offset, s_video_attr);
         } else if (look_harder) {
         /* I can't see why the sequence headers would be at arbitrary offsets in each sector,
          * and I've analyzed about 10 different VROs and they all have the same offsets.
@@ -1523,7 +1542,7 @@ int main(int argc, char** argv)
             fprintf(stdinfo, "vob format: %d\n", vvob->vob_format_id);
         }
         ifo_program_attrs[program].video_attr = vvob->vob_format_id-1;
-        ifo_program_attrs[program].scrambled = -1; /* don't know yet */
+        ifo_program_attrs[program].scrambled = SCRAMBLED_UNSET;
 
         NTOHS(vvob->vob_attr);
         int skip=0;
@@ -1599,7 +1618,8 @@ int main(int argc, char** argv)
                             exit(EXIT_FAILURE);
                         }
                     }
-                } else if (ifo_program_attrs[program].scrambled == 1) {
+                } else if (ifo_program_attrs[program].scrambled == SCRAMBLED ||
+                           ifo_program_attrs[program].scrambled == PARTIALLY_SCRAMBLED) {
                     display_char='E';
                     processed_some_video = true;
                 } else {
@@ -1628,9 +1648,11 @@ int main(int argc, char** argv)
 
         fprintf(stdinfo, "size : %'"PRIu64"\n",tot*DVD_SECTOR_SIZE);
 
-        if (ifo_program_attrs[program].scrambled == 1) {
+        if (ifo_program_attrs[program].scrambled == SCRAMBLED) {
             fprintf(stderr, "Warning: program is encrypted\n");
-        } else if (ifo_program_attrs[program].scrambled == -1 && processed_some_video) {
+        } else if (ifo_program_attrs[program].scrambled == PARTIALLY_SCRAMBLED) {
+            fprintf(stderr, "Warning: program is partially encrypted\n");
+        } else if (ifo_program_attrs[program].scrambled == SCRAMBLED_UNSET && processed_some_video) {
             fprintf(stderr, "Warning: didn't detect a video stream, please report\n");
             fprintf(stderr, "  (preferably with a sample vob file)\n");
         }

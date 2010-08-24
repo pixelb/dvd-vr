@@ -152,3 +152,14 @@ V0.9.6  18-02-2010
       Fix compilation on Mac OS X. Reported by Eyal.
       Suppress posix_fadvise warnings when writing to stdout.
         Reported by Kyosuke Tokoro.
+
+V0.9.7  24-08-2010
+
+    P@draigBrady.com:
+      Identify partially encrypted programs.
+       Panasonic (sky) recorders were seen to leave 15s of video unscrambled.
+       Report and sample video from Colin Wall <colin.wall@clear.net.nz>.
+      Fix modification of Sequence Display Extensions in MPEG streams.
+       Creating inconsistent SDEs breaks gstreamer based players at least.
+       Report and sample video from Zhaohui Wang <carbon_60@yahoo.com>.
+      Fix strndup() which may have accessed out of bounds memory.
