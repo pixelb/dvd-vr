@@ -89,10 +89,11 @@ Requirements:
 #endif
 
 #define TYPE_SIGNED(t) (! ((t) 0 < (t) -1))
+#define TYPE_WIDTH(t) (sizeof (t) * CHAR_BIT)
 #define TYPE_MAX(t) \
   ((t) (! TYPE_SIGNED (t) \
         ? (t) -1 \
-        : ~ (~ (t) 0 << (sizeof (t) * CHAR_BIT - 1))))
+        : ((((t) 1 << (TYPE_WIDTH (t) - 2)) - 1) * 2 + 1)))
 #define OFF_T_MAX TYPE_MAX(off_t)
 
 #define STREQ(x,y) (strcmp(x,y)==0)
@@ -552,7 +553,10 @@ typedef struct {
     uint8_t  data[7];
 } PACKED time_info_t;
 typedef struct {
-    uint8_t vobu_info[3];
+    uint8_t  data1;
+    /* only 14 bits are used for size,
+     * but use full 16 for easy access.  */
+    uint16_t vobu_size;
 } PACKED vobu_info_t;
 
 typedef struct {
@@ -1588,7 +1592,7 @@ int main(int argc, char** argv)
             init_mpeg2_cache();
         }
         for (vobus=0; vobus<vobu_map->nr_of_vobu_info; vobus++) {
-            uint16_t vobu_size = *(uint16_t*)(&vobu_info->vobu_info[1]);
+            uint16_t vobu_size = vobu_info->vobu_size;
             NTOHS(vobu_size); vobu_size&=0x03FF;
             if (vro_fd != -1) {
                 off_t curr_offset = lseek(vro_fd, 0, SEEK_CUR);
