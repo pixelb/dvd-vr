@@ -1,0 +1,30 @@
+.TH DVD-VR "1" "User Commands"
+.SH NAME
+dvd-vr \- Identify and optionally copy recordings from DVD\-VR files.
+.SH SYNOPSIS
+.B dvd-vr
+[\fI\,OPTION\/\fR]... \fI\,VR_MANGR.IFO \/\fR[\fI\,VR_MOVIE.VRO\/\fR]
+.SH DESCRIPTION
+.PP
+Print info about and optionally extract vob data from DVD\-VR files.
+.PP
+If the VRO file is specified, the component programs are
+extracted to the current directory or to stdout.
+.TP
+\fB\-p\fR, \fB\-\-program\fR=\fI\,NUM\/\fR
+Only process program NUM rather than all programs.
+.TP
+\fB\-n\fR, \fB\-\-name\fR=\fI\,NAME\/\fR
+Specify a basename to use for extracted vob files
+rather than using one based on the timestamp.
+If you pass `\-' the vob files will be written to stdout.
+If you pass `[label]' the names will be based on
+a sanitized version of the title or label.
+.TP
+\fB\-\-help\fR
+Display this help and exit.
+.TP
+\fB\-\-version\fR
+Output version information and exit.
+.SH AUTHOR
+Written by Pádraig Brady <P@draigBrady.com>

@@ -72,7 +72,7 @@ $(BINARY): $(OBJECTS)
 all: $(BINARY) man
 
 .PHONY: dist
-dist: man clean
+dist: distman clean
 	mkdir $(NAME)-$(VERSION)
 	tar --exclude $(NAME)-$(VERSION) --exclude .svn --exclude .git -c . | (cd $(NAME)-$(VERSION) && tar -xp)
 	tar c $(NAME)-$(VERSION) | gzip -9 > $(NAME)-$(VERSION).tar.gz
@@ -83,11 +83,21 @@ clean:
 	-@rm -f *.o $(BINARY) core*
 	-@rm -Rf $(NAME)-$(VERSION)*
 
-man/$(NAME).1: $(BINARY) man/$(NAME).x
+.PHONY: maintainer-clean
+maintainer-clean: clean
+	-@rm -f man/$(NAME).1
+
+.PHONY: distman
+distman: $(BINARY) man/$(NAME).x
 	help2man --no-info --include=man/$(NAME).x ./$(BINARY) > man/$(NAME).1
 
+#copy default if building from repo rather than tarball
+#so that we remove the dependence on help2man and perl
+man/$(NAME).1:
+	cp man/$(NAME).man man/$(NAME).1
+
 .PHONY: man
-man: man/$(NAME).1
+man: | man/$(NAME).1
 
 datadir := $(PREFIX)/share
 mandir := $(datadir)/man
@@ -95,7 +105,7 @@ man1dir := $(mandir)/man1
 bindir := $(PREFIX)/bin
 
 .PHONY: install
-install: $(BINARY)
+install: $(BINARY) man
 	-@mkdir -p $(DESTDIR)$(bindir)
 	cp -p $(BINARY) $(DESTDIR)$(bindir)
 	-@mkdir -p $(DESTDIR)$(man1dir)
