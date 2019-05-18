@@ -1520,7 +1520,7 @@ int main(int argc, char** argv)
         }
 
         int vob_fd=-1;
-        char vob_name[sizeof(vob_base)+4];
+        char vob_name[sizeof(vob_base)+32];
         if (vro_fd!=-1) {
             if (STREQ(base_name, "-")) {
                 vob_fd=fileno(stdout);
