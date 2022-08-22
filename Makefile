@@ -14,7 +14,7 @@ else
 endif
 
 # Use `make UNIVERSAL=1` to build a Mac OS X universal binary
-HAVE_MACOSX := $(shell gcc -xc -mmacosx-version-min -c - < /dev/null 2>/dev/null && echo 1 || echo 0)
+HAVE_MACOSX := $(shell $(CC) -xc -mmacosx-version-min -c - < /dev/null 2>/dev/null && echo 1 || echo 0)
 ifeq ($(UNIVERSAL),1)
 ifeq ($(HAVE_MACOSX),1)
     UNIVERSAL_BINARY := -mmacosx-version-min=10.4 -force_cpusubtype_ALL -arch x86_64 -arch i386 -arch ppc
@@ -27,7 +27,7 @@ endif
 
 # Use iconv when available
 # This is not cached across make invocations unfortunately
-HAVE_ICONV := $(shell echo "#include <iconv.h>" | cpp -xc >/dev/null 2>&1 && echo 1 || echo 0)
+HAVE_ICONV := $(shell echo "#include <iconv.h>" | $(CC) -xc -E - -o- >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(HAVE_ICONV),1)
     override CFLAGS+=-DHAVE_ICONV
 
