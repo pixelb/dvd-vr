@@ -27,12 +27,13 @@ endif
 
 # Use iconv when available
 # This is not cached across make invocations unfortunately
-HAVE_ICONV := $(shell echo "#include <iconv.h>" | $(CC) -xc -E - -o- >/dev/null 2>&1 && echo 1 || echo 0)
+H := \#
+HAVE_ICONV := $(shell echo '$(H)include <iconv.h>' | $(CC) -xc -E - -o- >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(HAVE_ICONV),1)
     override CFLAGS+=-DHAVE_ICONV
 
     # Work around const warnings
-    ICONV_CONST := $(shell (echo "#include <iconv.h>"; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | $(CC) -xc -S - -o- >/dev/null 2>&1 || echo const)
+    ICONV_CONST := $(shell (echo '$(H)include <iconv.h>'; echo "size_t iconv(iconv_t,char **,size_t*,char **,size_t*);") | $(CC) -xc -S - -o- >/dev/null 2>&1 || echo const)
     override CFLAGS+=-DICONV_CONST="$(ICONV_CONST)"
 
     # Add -liconv where available/required like Mac OS X & CYGWIN for example
